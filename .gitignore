@@ -1,0 +1,15 @@
+# Compiled binaries / release artifacts
+/dist/
+/app/clashvless
+*.exe
+
+# Local working notes — kept untracked (see CLAUDE.md)
+/context.md
+
+# Runtime / debug output
+events.log
+*.tmp
+
+# Editor / OS cruft
+*.swp
+.DS_Store

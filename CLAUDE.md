@@ -1,0 +1,52 @@
+# clash_vless — project guide for Claude
+
+`clashvless` is a single-binary Go CLI/TUI that manages a **Happ-gated Remnawave
+subscription** and keeps a local SOCKS5 proxy pointed at the best working exit,
+with automatic tiered failover.
+
+## Layout
+- `app/` — the Go module (`module clashvless`, Go 1.26). All source lives here.
+  - `main.go` — CLI entrypoint + command dispatch.
+  - `internal/store` — on-disk state (subs, cached nodes, stable device identity, tunables).
+  - `internal/happ` — fetches a Remnawave sub while mimicking the Happ 3.x client; parses nodes.
+  - `internal/xray` — `vless://` → xray outbound, and full-config assembly (incl. entry→main chaining).
+  - `internal/engine` — embeds xray-core in-process; the failover supervisor + probes.
+  - `internal/tui` — Bubble Tea dashboard (Status / Subs / Tiers / Log / Config).
+- `app/vendor/` — vendored deps (committed; builds are hermetic/offline).
+- `dist/` — prebuilt release binaries (**not committed**; build artifacts).
+
+## Build & run
+```
+go -C app build -o ../dist/clashvless .     # build the single binary
+go -C app run . [command]                   # run from source
+go -C app build ./...                        # compile-check every package
+```
+Bare `clashvless` (or `tui`) launches the dashboard. Key commands: `add <url>`,
+`fetch`, `main <vless://>`, `main-chain <vless://>`, `up [entry]`, `run`, `whoami`.
+See the default-case help block in `main.go` for the full list.
+
+## Architecture essentials
+- **Topology**: local SOCKS inbound → `main` outbound (the final exit, always).
+- **Tiers** (auto-cascade with hysteresis; see `engine/supervisor.go`):
+  - **T1** direct `main` (XTLS-Vision OK).
+  - **T2** `main` dialed *through* a country-exit entry node.
+  - **T3** `main` dialed *through* an ОБХОД / bypass (whitelist) entry node.
+- **Chaining trick** (`xray.BuildConfig`): a chained `main` dials through the entry via
+  outbound `proxySettings.tag`, and its XTLS flow is stripped — Vision only works on a
+  direct hop, so the chained exit must be a `flow=""` user (set via `main-chain`).
+- **Device identity** (`store.Device`): one stable HWID + Happ User-Agent is reused for
+  every fetch so we occupy exactly one panel device slot. Never mint a fresh HWID per fetch.
+- **State**: `$XDG_CONFIG_HOME/clash_vless/state.json`, written atomically at 0600 (it holds
+  sub tokens + HWID). Lives **outside** the repo — never commit it.
+
+## Conventions
+- `engine/runner.go` registers only the xray features actually used (keeps the binary small).
+  A config using an unregistered protocol/transport fails at runtime — add the blank import there.
+- Redact secrets (`id` / `publicKey` / `shortId` / `password`) when printing configs — see
+  `redactSecrets` in `main.go`.
+- Keep code comments minimal: only a line for a constraint the code itself can't show.
+
+## Context rule (IMPORTANT)
+`context.md` at the repo root is the living design / working-notes doc. It is **local and
+untracked** (git-ignored). **Update `context.md` as part of every commit**: before committing
+a change, refresh `context.md` so it reflects the new state. Never stage or commit `context.md`.
