@@ -98,7 +98,7 @@ func VlessToOutbound(uri, tag string) (json.RawMessage, error) {
 // BuildConfig assembles a full xray config: a single SOCKS inbound on port, and
 // main as the final outbound. If entry is non-nil, main is dialed through it
 // (entry → main); otherwise main is used directly (T1).
-func BuildConfig(port int, main, entry json.RawMessage, entryPort int, quiet bool) (json.RawMessage, error) {
+func BuildConfig(port int, main, entry json.RawMessage, entryPort int, quiet bool, listen string) (json.RawMessage, error) {
 	var mainM map[string]any
 	if err := json.Unmarshal(main, &mainM); err != nil {
 		return nil, fmt.Errorf("main outbound: %w", err)
@@ -131,10 +131,10 @@ func BuildConfig(port int, main, entry json.RawMessage, entryPort int, quiet boo
 		map[string]any{"tag": "block", "protocol": "blackhole"},
 	)
 
-	inbounds := []any{socksInbound("in", port)}
+	inbounds := []any{socksInbound("in", port, listen)}
 	rules := []any{map[string]any{"type": "field", "network": "tcp,udp", "outboundTag": "main"}}
 	if exposeEntry {
-		inbounds = append(inbounds, socksInbound("in-entry", entryPort))
+		inbounds = append(inbounds, socksInbound("in-entry", entryPort, listen))
 		rules = []any{
 			map[string]any{"type": "field", "inboundTag": []any{"in"}, "outboundTag": "main"},
 			map[string]any{"type": "field", "inboundTag": []any{"in-entry"}, "outboundTag": "entry"},
@@ -155,10 +155,13 @@ func BuildConfig(port int, main, entry json.RawMessage, entryPort int, quiet boo
 }
 
 // socksInbound builds a local SOCKS5 inbound on 127.0.0.1:port with the given tag.
-func socksInbound(tag string, port int) map[string]any {
+func socksInbound(tag string, port int, listen string) map[string]any {
+	if listen == "" {
+		listen = "127.0.0.1"
+	}
 	return map[string]any{
 		"tag":      tag,
-		"listen":   "127.0.0.1",
+		"listen":   listen,
 		"port":     port,
 		"protocol": "socks",
 		"settings": map[string]any{"auth": "noauth", "udp": true, "ip": "127.0.0.1"},

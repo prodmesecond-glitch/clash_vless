@@ -67,7 +67,8 @@ type State struct {
 
 	// engine tuning — editable in the TUI config tab (0 = built-in default).
 	ListenPort    int `json:"listen_port"`
-	EntryPort     int `json:"entry_port"` // first-hop local port while chained (0 = auto: ListenPort+1)
+	EntryPort     int    `json:"entry_port"`  // first-hop local port while chained (0 = auto: ListenPort+1)
+	ListenAddr    string `json:"listen_addr"` // bind address for local inbound(s); "" = 0.0.0.0 (LAN-reachable)
 	Interval      int `json:"interval_s"`
 	Timeout       int `json:"timeout_s"`
 	UpThreshold   int    `json:"up_threshold"`
@@ -88,6 +89,9 @@ type State struct {
 
 // DefaultUA is the client signature the panel expects (Happ 3.x).
 const DefaultUA = "Happ/3.13.0"
+
+// Version is the app version, shown in the TUI header and `version` command.
+const Version = "0.3.0"
 
 func Dir() (string, error) {
 	base, err := os.UserConfigDir()
@@ -226,6 +230,15 @@ func (s *State) EntryListenPort() int {
 		return s.EntryPort
 	}
 	return s.ListenPort + 1
+}
+
+// ListenHost is the bind address for the local SOCKS inbound(s). Empty config
+// means 0.0.0.0 (reachable from the LAN, not just localhost).
+func (s *State) ListenHost() string {
+	if s.ListenAddr != "" {
+		return s.ListenAddr
+	}
+	return "0.0.0.0"
 }
 
 // ActiveNodes returns the node set the engine should draw entries from: every

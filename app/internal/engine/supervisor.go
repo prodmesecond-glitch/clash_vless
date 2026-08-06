@@ -41,7 +41,8 @@ type Status struct {
 type Supervisor struct {
 	st        *store.State
 	mainPort  int
-	entryPort int // first hop exposed here while chained (0 = disabled)
+	entryPort int    // first hop exposed here while chained (0 = disabled)
+	listen    string // bind address for the LIVE local inbound(s)
 
 	kick chan struct{}
 
@@ -85,6 +86,7 @@ func NewSupervisor(st *store.State, onChange func(Status), onLog func(string)) *
 		st:        st,
 		mainPort:  st.ListenPort,
 		entryPort: entryPort,
+		listen:    st.ListenHost(),
 		kick:      make(chan struct{}, 1),
 		onChange:  onChange,
 		onLog:     onLog,
@@ -306,7 +308,7 @@ func (s *Supervisor) pinnedCycle(ctx context.Context, hopOB []namedOB, pin strin
 	if node.Whitelist {
 		tier = 3
 	}
-	cfg, err := xray.BuildConfig(s.mainPort, m.ob, node.Outbound, s.entryPort, true)
+	cfg, err := xray.BuildConfig(s.mainPort, m.ob, node.Outbound, s.entryPort, true, s.listen)
 	if err != nil {
 		s.emit(0, "", 0, err.Error(), "")
 		return
@@ -364,7 +366,7 @@ func (s *Supervisor) probeTier(ctx context.Context, directOB, hopOB []namedOB, t
 	if tier == 1 { // direct: each w/o-hop main (Vision OK), first that egresses
 		for _, m := range directOB {
 			if lat, ok := s.probe(ctx, m.ob, nil); ok {
-				cfg, err := xray.BuildConfig(s.mainPort, m.ob, nil, 0, true)
+				cfg, err := xray.BuildConfig(s.mainPort, m.ob, nil, 0, true, s.listen)
 				if err != nil {
 					continue
 				}
@@ -384,7 +386,7 @@ func (s *Supervisor) probeTier(ctx context.Context, directOB, hopOB []namedOB, t
 				break
 			}
 			if lat, ok := s.probe(ctx, m.ob, n.Outbound); ok {
-				cfg, err := xray.BuildConfig(s.mainPort, m.ob, n.Outbound, s.entryPort, true)
+				cfg, err := xray.BuildConfig(s.mainPort, m.ob, n.Outbound, s.entryPort, true, s.listen)
 				if err != nil {
 					continue
 				}
@@ -464,7 +466,7 @@ func (s *Supervisor) probe(ctx context.Context, mainOB, entryOB json.RawMessage)
 	if err != nil {
 		return 0, false
 	}
-	cfg, err := xray.BuildConfig(port, mainOB, entryOB, 0, true)
+	cfg, err := xray.BuildConfig(port, mainOB, entryOB, 0, true, "127.0.0.1") // probes stay local
 	if err != nil {
 		return 0, false
 	}

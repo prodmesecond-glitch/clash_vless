@@ -130,6 +130,10 @@ func run(args []string) error {
 	case "run":
 		return cmdRun(st, debug)
 
+	case "version", "--version", "-v":
+		fmt.Println("clashvless " + store.Version)
+		return nil
+
 	case "tui", "":
 		return tui.Run(st, debug)
 
@@ -161,7 +165,7 @@ func cmdGen(st *store.State, args []string) error {
 	if err != nil {
 		return err
 	}
-	cfg, err := xray.BuildConfig(st.ListenPort, mainOB, entryOB, st.EntryListenPort(), false)
+	cfg, err := xray.BuildConfig(st.ListenPort, mainOB, entryOB, st.EntryListenPort(), false, st.ListenHost())
 	if err != nil {
 		return err
 	}
@@ -179,7 +183,7 @@ func cmdUp(st *store.State, args []string) error {
 	if err != nil {
 		return err
 	}
-	cfg, err := xray.BuildConfig(st.ListenPort, mainOB, entryOB, st.EntryListenPort(), false)
+	cfg, err := xray.BuildConfig(st.ListenPort, mainOB, entryOB, st.EntryListenPort(), false, st.ListenHost())
 	if err != nil {
 		return err
 	}
