@@ -57,12 +57,14 @@ type State struct {
 
 	// engine tuning — editable in the TUI config tab (0 = built-in default).
 	ListenPort    int `json:"listen_port"`
+	EntryPort     int `json:"entry_port"` // first-hop local port while chained (0 = auto: ListenPort+1)
 	Interval      int `json:"interval_s"`
 	Timeout       int `json:"timeout_s"`
 	UpThreshold   int    `json:"up_threshold"`
 	DownThreshold int    `json:"down_threshold"`
 	PinTier       int    `json:"pin_tier"`
 	PinEntry      string `json:"pin_entry"` // pinned entry node name ("" = auto-select)
+	ForceHop      bool   `json:"force_hop"` // skip T1 direct — always route through a hop (T2/T3)
 
 	// legacy single-sub fields, migrated into Subs on load.
 	LegacyURL       string    `json:"subscription_url,omitempty"`
@@ -183,6 +185,15 @@ func (s *State) EventsLogPath() string {
 	return filepath.Join(filepath.Dir(s.path), "events.log")
 }
 
+// EntryListenPort is the local SOCKS port the current first hop (entry node) is
+// exposed on while a chained tier (T2/T3) is active. Config 0 = auto (ListenPort+1).
+func (s *State) EntryListenPort() int {
+	if s.EntryPort > 0 {
+		return s.EntryPort
+	}
+	return s.ListenPort + 1
+}
+
 // ActiveNodes returns the node set the engine should draw entries from: every
 // sub aggregated (AutoSelect), or just the selected sub. Always a fresh copy.
 func (s *State) ActiveNodes() []Node {
@@ -242,7 +253,7 @@ func (s *State) applyDefaults() (changed bool) {
 			changed = true
 		}
 	}
-	set(&s.ListenPort, 2080)
+	set(&s.ListenPort, 2084)
 	set(&s.Interval, 12)
 	set(&s.Timeout, 6)
 	set(&s.UpThreshold, 3)

@@ -163,7 +163,7 @@ func run(args []string) error {
 		fmt.Println("  fetch            refetch all subscriptions")
 		fmt.Println("  list             show active nodes (two pools)")
 		fmt.Println("  gen [entry]      print the xray config for main, optionally chained via a cached node")
-		fmt.Println("  up [entry]       start xray in-process on the single local port, optionally chained")
+		fmt.Println("  up [entry]       start xray in-process (chained via [entry] also exposes hop-1 on its own port)")
 		fmt.Println("  run              run the failover engine headless (auto T1→T2→T3, keep-alive)")
 		fmt.Println("  tui              launch the live dashboard (default with no args)")
 		fmt.Println("  whoami           show this device's identity (what the panel sees)")
@@ -179,11 +179,14 @@ func cmdGen(st *store.State, args []string) error {
 	if err != nil {
 		return err
 	}
-	cfg, err := xray.BuildConfig(st.ListenPort, mainOB, entryOB, false)
+	cfg, err := xray.BuildConfig(st.ListenPort, mainOB, entryOB, st.EntryListenPort(), false)
 	if err != nil {
 		return err
 	}
 	fmt.Printf("# app → socks5://127.0.0.1:%d → [%s] → main\n", st.ListenPort, label)
+	if entryOB != nil {
+		fmt.Printf("# first hop → socks5://127.0.0.1:%d → [%s] (exits at the entry)\n", st.EntryListenPort(), label)
+	}
 	fmt.Println(redactSecrets(string(cfg)))
 	return nil
 }
@@ -194,7 +197,7 @@ func cmdUp(st *store.State, args []string) error {
 	if err != nil {
 		return err
 	}
-	cfg, err := xray.BuildConfig(st.ListenPort, mainOB, entryOB, false)
+	cfg, err := xray.BuildConfig(st.ListenPort, mainOB, entryOB, st.EntryListenPort(), false)
 	if err != nil {
 		return err
 	}
@@ -205,6 +208,9 @@ func cmdUp(st *store.State, args []string) error {
 	defer inst.Close()
 
 	fmt.Printf("▶ xray up (in-process): socks5://127.0.0.1:%d → [%s] → main\n", st.ListenPort, label)
+	if entryOB != nil {
+		fmt.Printf("  first hop:              socks5://127.0.0.1:%d → [%s]\n", st.EntryListenPort(), label)
+	}
 	fmt.Println("  Ctrl-C to stop.")
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)

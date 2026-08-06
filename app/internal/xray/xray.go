@@ -98,12 +98,16 @@ func VlessToOutbound(uri, tag string) (json.RawMessage, error) {
 // BuildConfig assembles a full xray config: a single SOCKS inbound on port, and
 // main as the final outbound. If entry is non-nil, main is dialed through it
 // (entry → main); otherwise main is used directly (T1).
-func BuildConfig(port int, main, entry json.RawMessage, quiet bool) (json.RawMessage, error) {
+func BuildConfig(port int, main, entry json.RawMessage, entryPort int, quiet bool) (json.RawMessage, error) {
 	var mainM map[string]any
 	if err := json.Unmarshal(main, &mainM); err != nil {
 		return nil, fmt.Errorf("main outbound: %w", err)
 	}
 	mainM["tag"] = "main"
+
+	// Expose the first hop (entry) on its own local inbound when we're chaining
+	// and a distinct port is given — lets you use/probe the entry hop directly.
+	exposeEntry := entry != nil && entryPort > 0 && entryPort != port
 
 	outbounds := []any{}
 	if entry != nil {
@@ -127,26 +131,39 @@ func BuildConfig(port int, main, entry json.RawMessage, quiet bool) (json.RawMes
 		map[string]any{"tag": "block", "protocol": "blackhole"},
 	)
 
+	inbounds := []any{socksInbound("in", port)}
+	rules := []any{map[string]any{"type": "field", "network": "tcp,udp", "outboundTag": "main"}}
+	if exposeEntry {
+		inbounds = append(inbounds, socksInbound("in-entry", entryPort))
+		rules = []any{
+			map[string]any{"type": "field", "inboundTag": []any{"in"}, "outboundTag": "main"},
+			map[string]any{"type": "field", "inboundTag": []any{"in-entry"}, "outboundTag": "entry"},
+		}
+	}
+
 	logLevel := "warning"
 	if quiet {
 		logLevel = "none" // keep the embedded core silent (e.g. under the TUI)
 	}
 	cfg := map[string]any{
-		"log": map[string]any{"loglevel": logLevel},
-		"inbounds": []any{map[string]any{
-			"tag":      "in",
-			"listen":   "127.0.0.1",
-			"port":     port,
-			"protocol": "socks",
-			"settings": map[string]any{"auth": "noauth", "udp": true, "ip": "127.0.0.1"},
-			"sniffing": map[string]any{"enabled": true, "destOverride": []any{"http", "tls", "quic"}},
-		}},
+		"log":       map[string]any{"loglevel": logLevel},
+		"inbounds":  inbounds,
 		"outbounds": outbounds,
-		"routing": map[string]any{
-			"rules": []any{map[string]any{"type": "field", "network": "tcp,udp", "outboundTag": "main"}},
-		},
+		"routing":   map[string]any{"rules": rules},
 	}
 	return json.MarshalIndent(cfg, "", "  ")
+}
+
+// socksInbound builds a local SOCKS5 inbound on 127.0.0.1:port with the given tag.
+func socksInbound(tag string, port int) map[string]any {
+	return map[string]any{
+		"tag":      tag,
+		"listen":   "127.0.0.1",
+		"port":     port,
+		"protocol": "socks",
+		"settings": map[string]any{"auth": "noauth", "udp": true, "ip": "127.0.0.1"},
+		"sniffing": map[string]any{"enabled": true, "destOverride": []any{"http", "tls", "quic"}},
+	}
 }
 
 // stripFlow removes the XTLS flow from a vless outbound's first user. The outer

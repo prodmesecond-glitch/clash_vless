@@ -29,6 +29,17 @@ func TCPLatency(host string, port int, timeout time.Duration) (time.Duration, er
 	return time.Since(start), nil
 }
 
+// freePort asks the OS for an unused loopback TCP port. Throwaway probe instances
+// use a fresh one each time, so a service holding any fixed port can't wedge probing.
+func freePort() (int, error) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return 0, err
+	}
+	defer l.Close()
+	return l.Addr().(*net.TCPAddr).Port, nil
+}
+
 // waitPort blocks until a local TCP port accepts connections, up to timeout.
 func waitPort(port int, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)

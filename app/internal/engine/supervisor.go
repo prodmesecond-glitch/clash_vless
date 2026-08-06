@@ -40,7 +40,7 @@ type Status struct {
 type Supervisor struct {
 	st        *store.State
 	mainPort  int
-	probePort int
+	entryPort int // first hop exposed here while chained (0 = disabled)
 
 	kick chan struct{}
 
@@ -74,10 +74,14 @@ type plan struct {
 // Status snapshot on every state change; onLog (may be nil) receives one-line
 // activity events for a log view.
 func NewSupervisor(st *store.State, onChange func(Status), onLog func(string)) *Supervisor {
+	entryPort := st.EntryListenPort()
+	if entryPort == st.ListenPort {
+		entryPort = 0 // would collide with the main port — don't expose
+	}
 	return &Supervisor{
 		st:        st,
 		mainPort:  st.ListenPort,
-		probePort: st.ListenPort + 1,
+		entryPort: entryPort,
 		kick:      make(chan struct{}, 1),
 		onChange:  onChange,
 		onLog:     onLog,
@@ -107,6 +111,12 @@ func (s *Supervisor) SetConfig(mutate func(*store.State)) {
 }
 
 func (s *Supervisor) cfgStr(get func(*store.State) string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return get(s.st)
+}
+
+func (s *Supervisor) cfgBool(get func(*store.State) bool) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return get(s.st)
@@ -142,10 +152,14 @@ func (s *Supervisor) downThresh() int {
 
 const maxTryPerTier = 3
 
-// tierBounds honours a pinned tier (PinTier 1/2/3), else the full 1..3 cascade.
+// tierBounds honours a pinned tier (PinTier 1/2/3); else, with ForceHop, skips the
+// direct T1 and forces a hop (2..3); otherwise the full 1..3 cascade.
 func (s *Supervisor) tierBounds() (lo, hi int) {
 	if p := s.cfgInt(func(st *store.State) int { return st.PinTier }); p >= 1 && p <= 3 {
 		return p, p
+	}
+	if s.cfgBool(func(st *store.State) bool { return st.ForceHop }) {
+		return 2, 3
 	}
 	return 1, 3
 }
@@ -287,7 +301,7 @@ func (s *Supervisor) pinnedCycle(ctx context.Context, mainOB json.RawMessage, pi
 	if node.Whitelist {
 		tier = 3
 	}
-	cfg, err := xray.BuildConfig(s.mainPort, mainOB, node.Outbound, true)
+	cfg, err := xray.BuildConfig(s.mainPort, mainOB, node.Outbound, s.entryPort, true)
 	if err != nil {
 		s.emit(0, "", 0, err.Error(), "")
 		return
@@ -326,7 +340,7 @@ func (s *Supervisor) bestWorking(ctx context.Context, mainDirect, mainChain json
 func (s *Supervisor) probeTier(ctx context.Context, mainDirect, mainChain json.RawMessage, tier int) (plan, bool) {
 	if tier == 1 { // direct: use the Vision-capable main
 		if lat, ok := s.probe(ctx, mainDirect, nil); ok {
-			cfg, err := xray.BuildConfig(s.mainPort, mainDirect, nil, true)
+			cfg, err := xray.BuildConfig(s.mainPort, mainDirect, nil, 0, true)
 			if err != nil {
 				return plan{}, false
 			}
@@ -344,7 +358,7 @@ func (s *Supervisor) probeTier(ctx context.Context, mainDirect, mainChain json.R
 			break
 		}
 		if lat, ok := s.probe(ctx, mainChain, n.Outbound); ok {
-			cfg, err := xray.BuildConfig(s.mainPort, mainChain, n.Outbound, true)
+			cfg, err := xray.BuildConfig(s.mainPort, mainChain, n.Outbound, s.entryPort, true)
 			if err != nil {
 				continue
 			}
@@ -417,7 +431,13 @@ func (s *Supervisor) rankPool(whitelist bool) []*store.Node {
 // probe spins a throwaway xray on the probe port for a candidate (entry nil =
 // T1 direct) and returns whether it reaches the internet + the egress latency.
 func (s *Supervisor) probe(ctx context.Context, mainOB, entryOB json.RawMessage) (time.Duration, bool) {
-	cfg, err := xray.BuildConfig(s.probePort, mainOB, entryOB, true)
+	// A fresh OS-assigned port per probe: a fixed ListenPort+1 silently hard-failed
+	// every probe (→ permanent DOWN) whenever another service already held that port.
+	port, err := freePort()
+	if err != nil {
+		return 0, false
+	}
+	cfg, err := xray.BuildConfig(port, mainOB, entryOB, 0, true)
 	if err != nil {
 		return 0, false
 	}
@@ -426,10 +446,10 @@ func (s *Supervisor) probe(ctx context.Context, mainOB, entryOB json.RawMessage)
 		return 0, false
 	}
 	defer inst.Close()
-	if !waitPort(s.probePort, 1500*time.Millisecond) {
+	if !waitPort(port, 1500*time.Millisecond) {
 		return 0, false
 	}
-	lat, err := EgressThroughSOCKS(ctx, s.probePort, s.timeout())
+	lat, err := EgressThroughSOCKS(ctx, port, s.timeout())
 	return lat, err == nil
 }
 

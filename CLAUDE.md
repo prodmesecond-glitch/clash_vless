@@ -31,6 +31,12 @@ See the default-case help block in `main.go` for the full list.
   - **T1** direct `main` (XTLS-Vision OK).
   - **T2** `main` dialed *through* a country-exit entry node.
   - **T3** `main` dialed *through* an ОБХОД / bypass (whitelist) entry node.
+- **First-hop port**: while chained (T2/T3), the entry (first hop) is also served on its own
+  local SOCKS port — `store.EntryPort`, default `ListenPort+1` — routed straight out via the
+  `entry` outbound, so you can use/probe hop-1 directly. Ports: main `ListenPort` (default 2084), hop-1 `+1`; egress
+  probes use a throwaway OS-assigned port (`engine.freePort()`), never a fixed one.
+- **Force-hop** (`store.ForceHop`): skip T1 and always route through a hop (tier bounds → 2..3) —
+  a quick "is any hop working?" test that keeps the hop-1 port served. `PinTier`/`PinEntry` still override.
 - **Chaining trick** (`xray.BuildConfig`): a chained `main` dials through the entry via
   outbound `proxySettings.tag`, and its XTLS flow is stripped — Vision only works on a
   direct hop, so the chained exit must be a `flow=""` user (set via `main-chain`).

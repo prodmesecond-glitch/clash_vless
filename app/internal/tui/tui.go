@@ -429,7 +429,9 @@ var cfgFields = []cfgField{
 	{"Up threshold", func(st *store.State) int { return eff(st.UpThreshold, 3) }, func(st *store.State, v int) { st.UpThreshold = v }, 1, 10, nil, "cycles a better tier must hold"},
 	{"Down threshold", func(st *store.State) int { return eff(st.DownThreshold, 2) }, func(st *store.State, v int) { st.DownThreshold = v }, 1, 10, nil, "fails before switching down"},
 	{"Pin tier", func(st *store.State) int { return st.PinTier }, func(st *store.State, v int) { st.PinTier = v }, 0, 3, pinLabel, "0 = auto cascade"},
+	{"Force hop (skip T1)", func(st *store.State) int { return b2i(st.ForceHop) }, func(st *store.State, v int) { st.ForceHop = v != 0 }, 0, 1, onOff, "always route through a hop — hop test"},
 	{"Listen port", func(st *store.State) int { return st.ListenPort }, func(st *store.State, v int) { st.ListenPort = v }, 1024, 65535, nil, "restart to apply"},
+	{"First-hop port", func(st *store.State) int { return st.EntryPort }, func(st *store.State, v int) { st.EntryPort = v }, 0, 65535, entryPortLabel, "0 = auto (listen+1); restart to apply"},
 }
 
 // --- styles ------------------------------------------------------------------
@@ -516,10 +518,16 @@ func fetchErrMsg(err error) string {
 func (m *model) statusView() string {
 	s := m.status
 	conn := sectionStyle.Render("CONNECTION") + "\n" + activeLine(s)
+	if m.st.ForceHop {
+		conn += "\n" + keyStyle.Render("force-hop on") + dimStyle.Render("  skipping direct T1")
+	}
 	if s.Note != "" {
 		conn += "\n" + dimStyle.Render(s.Note)
 	}
 	conn += "\n" + dimStyle.Render(fmt.Sprintf("socks5://127.0.0.1:%d", m.st.ListenPort))
+	if s.Tier >= 2 && s.Entry != "" {
+		conn += "\n" + dimStyle.Render(fmt.Sprintf("first-hop  :%d → %s", m.st.EntryListenPort(), trunc(s.Entry, 22)))
+	}
 
 	nodes := m.st.ActiveNodes()
 	nExit, nWl := poolCounts(nodes)
@@ -844,6 +852,27 @@ func pinLabel(t int) string {
 		return "T3"
 	}
 	return "auto"
+}
+
+func entryPortLabel(v int) string {
+	if v == 0 {
+		return "auto"
+	}
+	return strconv.Itoa(v)
+}
+
+func b2i(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+func onOff(v int) string {
+	if v != 0 {
+		return "on"
+	}
+	return "off"
 }
 
 func trunc(s string, n int) string {
