@@ -106,15 +106,21 @@ func Path() (string, error) {
 }
 
 // Load reads state from disk, creating a fresh document (with a new stable HWID)
-// if none exists, and migrating any legacy single-subscription document.
-func Load() (*State, error) {
-	p, err := Path()
-	if err != nil {
-		return nil, err
+// if none exists, and migrating legacy documents. If path is empty the default
+// location is used; if path is an existing directory, its state.json is used.
+func Load(path string) (*State, error) {
+	if path == "" {
+		p, err := Path()
+		if err != nil {
+			return nil, err
+		}
+		path = p
+	} else if fi, err := os.Stat(path); err == nil && fi.IsDir() {
+		path = filepath.Join(path, "state.json")
 	}
-	s := &State{path: p}
+	s := &State{path: path}
 
-	data, err := os.ReadFile(p)
+	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		s.Device = defaultDevice()
 		s.applyDefaults()
@@ -124,9 +130,9 @@ func Load() (*State, error) {
 		return nil, err
 	}
 	if err := json.Unmarshal(data, s); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", p, err)
+		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
-	s.path = p
+	s.path = path
 
 	changed := false
 	if s.migrate() {
@@ -200,6 +206,9 @@ func (s *State) Save() error {
 	}
 	return os.Rename(tmp, s.path)
 }
+
+// FilePath returns the on-disk state file currently in use.
+func (s *State) FilePath() string { return s.path }
 
 func (s *State) RawPath() string {
 	return filepath.Join(filepath.Dir(s.path), "last_sub.raw")

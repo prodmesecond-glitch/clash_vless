@@ -36,20 +36,35 @@ func main() {
 
 func run(args []string) error {
 	var debug, cli bool
+	var configPath string
 	var rest []string
-	for _, a := range args {
-		switch a {
-		case "--debug":
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--debug":
 			debug = true
-		case "--cli":
+		case a == "--cli":
 			cli = true
+		case a == "--config":
+			if i+1 >= len(args) {
+				return errors.New("--config needs a path")
+			}
+			i++
+			configPath = args[i]
+		case strings.HasPrefix(a, "--config="):
+			configPath = strings.TrimPrefix(a, "--config=")
 		default:
 			rest = append(rest, a)
 		}
 	}
 	args = rest
+	if len(configPath) >= 2 && configPath[:2] == "~/" {
+		if home, err := os.UserHomeDir(); err == nil {
+			configPath = home + configPath[1:]
+		}
+	}
 
-	st, err := store.Load()
+	st, err := store.Load(configPath)
 	if err != nil {
 		return err
 	}
@@ -134,7 +149,7 @@ func run(args []string) error {
 		fmt.Println("  run              run the failover engine headless (auto T1→T2→T3, keep-alive)")
 		fmt.Println("  tui              launch the live dashboard (default with no args)")
 		fmt.Println("  whoami           show this device's identity (what the panel sees)")
-		fmt.Println("flags: --cli (headless run)   --debug (mirror events to events.log)")
+		fmt.Println("flags: --config <path> (alt state file/dir)   --cli (headless)   --debug (events.log)")
 		return nil
 	}
 }
@@ -426,9 +441,7 @@ func printDevice(st *store.State) {
 	fmt.Printf("  label (panel)  : %s / %s\n", d.OS, d.Model)
 	fmt.Printf("  user-agent     : %s\n", d.UA)
 	fmt.Printf("  hwid           : %s\n", d.HWID)
-	if p, err := store.Path(); err == nil {
-		fmt.Printf("  stored at      : %s\n", p)
-	}
+	fmt.Printf("  stored at      : %s\n", st.FilePath())
 }
 
 // printNodes lists nodes split into the two pools this subscription uses:
