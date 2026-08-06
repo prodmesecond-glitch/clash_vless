@@ -11,7 +11,6 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -22,6 +21,7 @@ import (
 	"clashvless/internal/engine"
 	"clashvless/internal/happ"
 	"clashvless/internal/store"
+	"clashvless/internal/xray"
 )
 
 type statusMsg engine.Status
@@ -46,17 +46,18 @@ type subAddedMsg struct {
 const (
 	tabStatus = iota
 	tabSubs
-	tabTiers
+	tabMain
 	tabLog
 	tabConfig
 	tabCount
 )
 
-var tabNames = []string{"Status", "Subs", "Tiers", "Log", "Config"}
+var tabNames = []string{"Status", "Subs", "Main", "Log", "Config"}
 
 const (
 	inputNone = iota
 	inputAddSub
+	inputAddMain
 	inputEditCfg
 )
 
@@ -67,9 +68,10 @@ type model struct {
 	logs      []string
 	width     int
 	height    int
-	tab       int
-	cfgCursor int
-	rowCursor int          // Subs tab: index into the flattened sub/node rows
+	tab        int
+	cfgCursor  int
+	mainCursor int          // Main tab: index into st.Mains
+	rowCursor  int          // Subs tab: index into the flattened sub/node rows
 	rowScroll int
 	expanded  map[int]bool // Subs tab: which subs are expanded (dropdown)
 	inputMode int
@@ -151,6 +153,8 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch m.tab {
 	case tabSubs:
 		return m.handleSubsKey(msg)
+	case tabMain:
+		return m.handleMainKey(msg)
 	case tabConfig:
 		m.handleConfigKey(msg)
 	}
@@ -173,6 +177,8 @@ func (m *model) handleInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			m.busy = "adding…"
 			return m, m.addCmd(u)
+		case inputAddMain:
+			m.addMain(sanitizeURL(raw))
 		case inputEditCfg:
 			if v, err := strconv.Atoi(strings.TrimSpace(raw)); err == nil {
 				m.setCfg(m.cfgCursor, v)
@@ -459,8 +465,8 @@ func (m *model) View() string {
 		b.WriteString(m.statusView())
 	case tabSubs:
 		b.WriteString(m.subsView())
-	case tabTiers:
-		b.WriteString(m.tiersView())
+	case tabMain:
+		b.WriteString(m.mainView())
 	case tabLog:
 		b.WriteString(m.logView())
 	case tabConfig:
@@ -491,6 +497,8 @@ func (m *model) footer() string {
 	switch m.tab {
 	case tabSubs:
 		ctx = keyStyle.Render("a") + " add  " + keyStyle.Render("enter") + " expand/pin  " + keyStyle.Render("s") + " use-sub  " + keyStyle.Render("d") + " del  " + keyStyle.Render("space") + " auto  "
+	case tabMain:
+		ctx = keyStyle.Render("a") + " add  " + keyStyle.Render("e") + " enable  " + keyStyle.Render("w") + " w/o-hop  " + keyStyle.Render("d") + " del  "
 	case tabConfig:
 		ctx = keyStyle.Render("enter") + " type  " + keyStyle.Render("←→") + " nudge  "
 	}
@@ -643,19 +651,113 @@ func (m *model) probeByName() map[string]engine.Probe {
 	return p
 }
 
-func (m *model) tiersView() string {
-	s := m.status
-	t1mark := "  "
-	if s.Tier == 1 {
-		t1mark = okStyle.Render("● ")
+func (m *model) mainView() string {
+	var b strings.Builder
+	b.WriteString(sectionStyle.Render("MAIN EXITS") + "   " + dimStyle.Render("w/o-hop → T1 direct · others → hop (T2/T3)") + "\n\n")
+	if len(m.st.Mains) == 0 {
+		b.WriteString(dimStyle.Render("  no mains — press ") + keyStyle.Render("a") + dimStyle.Render(" to add a vless:// exit"))
+		return b.String()
 	}
-	t1 := sectionStyle.Render("TIER 1 · MAIN (final exit, always)") + "\n" + t1mark + hostOf(m.st.MainURL)
-	if s.Tier == 1 {
-		t1 += okStyle.Render("   active")
+	m.clampMainCursor()
+	for i := range m.st.Mains {
+		mn := &m.st.Mains[i]
+		cur := "  "
+		if i == m.mainCursor {
+			cur = activeStyle.Render("▸ ")
+		}
+		live := "  "
+		if m.status.Tier > 0 && m.status.Main == mn.Name {
+			live = okStyle.Render("● ")
+		}
+		en := badStyle.Render("[ ]")
+		if mn.Enabled {
+			en = okStyle.Render("[x]")
+		}
+		hop := "[ ]"
+		if mn.AllowNoHop {
+			hop = "[x]"
+		}
+		vis := ""
+		if store.IsVision(mn.URL) {
+			vis = keyStyle.Render(" vision")
+		}
+		b.WriteString(fmt.Sprintf("%s%s%-20s %-19s  enable %s  w/o-hop %s%s\n",
+			cur, live, trunc(mn.Name, 20), hostOf(mn.URL), en, hop, vis))
 	}
-	left := renderPool(fmt.Sprintf("TIER 2 · EXIT · non-wl (%d)", len(s.Country)), s.Country, s.Entry)
-	right := renderPool(fmt.Sprintf("TIER 3 · ОБХОД · wl (%d)", len(s.Bypass)), s.Bypass, s.Entry)
-	return t1 + "\n\n" + lipgloss.JoinHorizontal(lipgloss.Top, left, "    ", right)
+	if m.inputMode == inputAddMain {
+		b.WriteString("\n" + sectionStyle.Render("add main URL: ") + m.inputBuf + "▏")
+	}
+	b.WriteString("\n" + dimStyle.Render("  enable = use it · w/o-hop = allow direct (T1); off = hop-only. Vision must stay direct."))
+	return b.String()
+}
+
+func (m *model) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	n := len(m.st.Mains)
+	switch msg.String() {
+	case "up", "k":
+		if m.mainCursor > 0 {
+			m.mainCursor--
+		}
+	case "down", "j":
+		if m.mainCursor < n-1 {
+			m.mainCursor++
+		}
+	case "a":
+		m.inputMode, m.inputBuf, m.busy = inputAddMain, "", "paste vless:// URL, Enter to add"
+	case "e", "enter":
+		if n > 0 {
+			m.toggleMain(m.mainCursor, true)
+		}
+	case " ", "space", "w":
+		if n > 0 {
+			m.toggleMain(m.mainCursor, false)
+		}
+	case "d":
+		if n > 0 {
+			i := m.mainCursor
+			m.sup.SetConfig(func(st *store.State) { st.RemoveMain(i) })
+			_ = m.st.Save()
+			m.sup.Kick()
+			m.busy = "removed"
+		}
+	}
+	return m, nil
+}
+
+func (m *model) toggleMain(i int, enable bool) {
+	m.sup.SetConfig(func(st *store.State) {
+		if i < 0 || i >= len(st.Mains) {
+			return
+		}
+		if enable {
+			st.Mains[i].Enabled = !st.Mains[i].Enabled
+		} else {
+			st.Mains[i].AllowNoHop = !st.Mains[i].AllowNoHop
+		}
+	})
+	_ = m.st.Save()
+	m.sup.Kick()
+	m.busy = "saved ✓"
+}
+
+func (m *model) addMain(u string) {
+	if _, err := xray.VlessToOutbound(u, "main"); err != nil {
+		m.busy = "invalid vless:// URL"
+		return
+	}
+	m.sup.SetConfig(func(st *store.State) { st.AddMain(u) })
+	_ = m.st.Save()
+	m.sup.Kick()
+	m.busy = "main added"
+}
+
+func (m *model) clampMainCursor() {
+	if m.mainCursor >= len(m.st.Mains) {
+		m.mainCursor = len(m.st.Mains) - 1
+	}
+	if m.mainCursor < 0 {
+		m.mainCursor = 0
+	}
 }
 
 func (m *model) logView() string {
@@ -754,10 +856,17 @@ func activeLine(s engine.Status) string {
 		}
 		return badStyle.Render("✖ DOWN") + "  " + dimStyle.Render(msg)
 	case 1:
-		return okStyle.Render("● T1") + "  direct → main" + egressStr(s.Egress)
+		return okStyle.Render("● T1") + "  direct → " + mainLabel(s.Main) + egressStr(s.Egress)
 	default:
-		return okStyle.Render(fmt.Sprintf("● T%d", s.Tier)) + fmt.Sprintf("  %s → main", s.Entry) + egressStr(s.Egress)
+		return okStyle.Render(fmt.Sprintf("● T%d", s.Tier)) + fmt.Sprintf("  %s → %s", s.Entry, mainLabel(s.Main)) + egressStr(s.Egress)
 	}
+}
+
+func mainLabel(n string) string {
+	if n == "" {
+		return "main"
+	}
+	return trunc(n, 18)
 }
 
 func egressStr(d time.Duration) string {
@@ -765,35 +874,6 @@ func egressStr(d time.Duration) string {
 		return ""
 	}
 	return dimStyle.Render(fmt.Sprintf("    egress %dms", d.Milliseconds()))
-}
-
-func renderPool(title string, probes []engine.Probe, active string) string {
-	var b strings.Builder
-	b.WriteString(dimStyle.Render(title) + "\n")
-	ps := append([]engine.Probe(nil), probes...)
-	sort.SliceStable(ps, func(i, j int) bool {
-		if ps[i].OK != ps[j].OK {
-			return ps[i].OK
-		}
-		return ps[i].Latency < ps[j].Latency
-	})
-	if len(ps) == 0 {
-		b.WriteString(dimStyle.Render("  (probing…)") + "\n")
-		return b.String()
-	}
-	for _, p := range ps {
-		name := trunc(p.Name, 20)
-		lat := badStyle.Render("   ×  ")
-		if p.OK {
-			lat = fmt.Sprintf("%4dms", p.Latency.Milliseconds())
-		}
-		if active != "" && p.Name == active {
-			b.WriteString(activeStyle.Render(fmt.Sprintf("► %-20s %s", name, lat)) + "\n")
-		} else {
-			b.WriteString(fmt.Sprintf("  %-20s %s\n", name, lat))
-		}
-	}
-	return b.String()
 }
 
 func poolCounts(nodes []store.Node) (exit, wl int) {

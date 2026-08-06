@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -45,15 +46,24 @@ type Subscription struct {
 	LastFetch time.Time `json:"last_fetch"`
 }
 
+// Main is a final-exit candidate. AllowNoHop lets it serve directly (T1);
+// otherwise it is used only through a hop (T2/T3). Vision exits can never be
+// hopped (chaining strips the XTLS flow), so they must run direct.
+type Main struct {
+	Name       string `json:"name"`
+	URL        string `json:"url"`
+	Enabled    bool   `json:"enabled"`
+	AllowNoHop bool   `json:"allow_no_hop"`
+}
+
 // State is the persisted storage document.
 type State struct {
 	Subs       []Subscription `json:"subs"`
 	ActiveSub  int            `json:"active_sub"`  // index into Subs (used when !AutoSelect)
 	AutoSelect bool           `json:"auto_select"` // true = aggregate every sub's nodes
 
-	Device       Device `json:"device"`
-	MainURL      string `json:"main_url"`       // direct exit (T1) — may use XTLS-Vision
-	MainChainURL string `json:"main_chain_url"` // chained exit (T2/T3) — must be flow="" (non-Vision); falls back to MainURL
+	Device Device `json:"device"`
+	Mains  []Main `json:"mains"` // final-exit candidates: direct (w/o-hop → T1) and/or hopped (T2/T3)
 
 	// engine tuning — editable in the TUI config tab (0 = built-in default).
 	ListenPort    int `json:"listen_port"`
@@ -66,10 +76,12 @@ type State struct {
 	PinEntry      string `json:"pin_entry"` // pinned entry node name ("" = auto-select)
 	ForceHop      bool   `json:"force_hop"` // skip T1 direct — always route through a hop (T2/T3)
 
-	// legacy single-sub fields, migrated into Subs on load.
+	// legacy fields, migrated into Subs / Mains on load.
 	LegacyURL       string    `json:"subscription_url,omitempty"`
 	LegacyNodes     []Node    `json:"nodes,omitempty"`
 	LegacyLastFetch time.Time `json:"last_fetch,omitempty"`
+	MainURL         string    `json:"main_url,omitempty"`
+	MainChainURL    string    `json:"main_chain_url,omitempty"`
 
 	path string
 }
@@ -135,8 +147,9 @@ func Load() (*State, error) {
 	return s, nil
 }
 
-// migrate folds a pre-multi-sub document into the Subs list.
+// migrate folds pre-multi-sub and single-main documents into Subs / Mains.
 func (s *State) migrate() bool {
+	changed := false
 	if len(s.Subs) == 0 && s.LegacyURL != "" {
 		s.Subs = []Subscription{{
 			Name:      subName(s.LegacyURL),
@@ -148,9 +161,21 @@ func (s *State) migrate() bool {
 	}
 	if s.LegacyURL != "" || s.LegacyNodes != nil {
 		s.LegacyURL, s.LegacyNodes, s.LegacyLastFetch = "", nil, time.Time{}
-		return true
+		changed = true
 	}
-	return false
+	if len(s.Mains) == 0 {
+		if s.MainURL != "" {
+			s.Mains = append(s.Mains, Main{Name: mainName(s.MainURL), URL: s.MainURL, Enabled: true, AllowNoHop: true})
+		}
+		if s.MainChainURL != "" && s.MainChainURL != s.MainURL {
+			s.Mains = append(s.Mains, Main{Name: mainName(s.MainChainURL), URL: s.MainChainURL, Enabled: true, AllowNoHop: false})
+		}
+	}
+	if s.MainURL != "" || s.MainChainURL != "" {
+		s.MainURL, s.MainChainURL = "", ""
+		changed = true
+	}
+	return changed
 }
 
 // Save writes the document atomically with 0600 perms (it holds sub tokens).
@@ -219,6 +244,64 @@ func (s *State) FindNodeByName(name string) *Node {
 		}
 	}
 	return nil
+}
+
+// DirectMains returns enabled mains eligible to serve without a hop (T1).
+func (s *State) DirectMains() []Main {
+	var out []Main
+	for _, m := range s.Mains {
+		if m.Enabled && m.AllowNoHop {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// HopMains returns enabled mains that can be dialed through a hop (T2/T3).
+// Vision exits are excluded — the chain strips their XTLS flow.
+func (s *State) HopMains() []Main {
+	var out []Main
+	for _, m := range s.Mains {
+		if m.Enabled && !IsVision(m.URL) {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// AddMain appends a main. New mains are enabled; a Vision exit defaults to
+// direct-only (w/o-hop on), a plain exit defaults to hop-only (w/o-hop off).
+func (s *State) AddMain(u string) {
+	s.Mains = append(s.Mains, Main{Name: mainName(u), URL: u, Enabled: true, AllowNoHop: IsVision(u)})
+}
+
+// RemoveMain deletes the main at index i.
+func (s *State) RemoveMain(i int) {
+	if i < 0 || i >= len(s.Mains) {
+		return
+	}
+	s.Mains = append(s.Mains[:i], s.Mains[i+1:]...)
+}
+
+// IsVision reports whether a vless URL uses XTLS-Vision flow (direct-only).
+func IsVision(u string) bool {
+	return strings.Contains(u, "xtls-rprx-vision")
+}
+
+// mainName derives a readable label for a main from its URL fragment or host.
+func mainName(u string) string {
+	if p, err := url.Parse(u); err == nil {
+		if f := strings.TrimSpace(p.Fragment); f != "" {
+			if dec, e := url.QueryUnescape(f); e == nil {
+				return strings.TrimSpace(dec)
+			}
+			return f
+		}
+		if p.Host != "" {
+			return p.Host
+		}
+	}
+	return "main"
 }
 
 // AddSub appends a subscription (activating it if it's the first).

@@ -11,7 +11,7 @@ with automatic tiered failover.
   - `internal/happ` — fetches a Remnawave sub while mimicking the Happ 3.x client; parses nodes.
   - `internal/xray` — `vless://` → xray outbound, and full-config assembly (incl. entry→main chaining).
   - `internal/engine` — embeds xray-core in-process; the failover supervisor + probes.
-  - `internal/tui` — Bubble Tea dashboard (Status / Subs / Tiers / Log / Config).
+  - `internal/tui` — Bubble Tea dashboard (Status / Subs / Main / Log / Config).
 - `app/vendor/` — vendored deps (committed; builds are hermetic/offline).
 - `dist/` — prebuilt release binaries (**not committed**; build artifacts).
 
@@ -22,15 +22,19 @@ go -C app run . [command]                   # run from source
 go -C app build ./...                        # compile-check every package
 ```
 Bare `clashvless` (or `tui`) launches the dashboard. Key commands: `add <url>`,
-`fetch`, `main <vless://>`, `main-chain <vless://>`, `up [entry]`, `run`, `whoami`.
+`fetch`, `main add <vless://>`, `up [entry]`, `run`, `whoami`.
 See the default-case help block in `main.go` for the full list.
 
 ## Architecture essentials
 - **Topology**: local SOCKS inbound → `main` outbound (the final exit, always).
+- **Mains** (`store.Mains`, managed in the TUI **Main** tab): a list of final-exit
+  candidates, each `{Enabled, AllowNoHop}`. `AllowNoHop` mains are tried **direct** (T1);
+  every enabled **non-Vision** main is eligible to be dialed **through a hop** (T2/T3).
+  Vision exits are direct-only (chaining strips their XTLS flow) so they never hop.
 - **Tiers** (auto-cascade with hysteresis; see `engine/supervisor.go`):
-  - **T1** direct `main` (XTLS-Vision OK).
-  - **T2** `main` dialed *through* a country-exit entry node.
-  - **T3** `main` dialed *through* an ОБХОД / bypass (whitelist) entry node.
+  - **T1** a w/o-hop `main` used directly (XTLS-Vision OK here).
+  - **T2** a non-Vision `main` dialed *through* a country-exit entry node.
+  - **T3** a non-Vision `main` dialed *through* an ОБХОД / bypass (whitelist) entry node.
 - **First-hop port**: while chained (T2/T3), the entry (first hop) is also served on its own
   local SOCKS port — `store.EntryPort`, default `ListenPort+1` — routed straight out via the
   `entry` outbound, so you can use/probe hop-1 directly. Ports: main `ListenPort` (default 2084), hop-1 `+1`; egress
@@ -39,7 +43,7 @@ See the default-case help block in `main.go` for the full list.
   a quick "is any hop working?" test that keeps the hop-1 port served. `PinTier`/`PinEntry` still override.
 - **Chaining trick** (`xray.BuildConfig`): a chained `main` dials through the entry via
   outbound `proxySettings.tag`, and its XTLS flow is stripped — Vision only works on a
-  direct hop, so the chained exit must be a `flow=""` user (set via `main-chain`).
+  direct hop, so a hopped main must be a `flow=""` (non-Vision) user.
 - **Device identity** (`store.Device`): one stable HWID + Happ User-Agent is reused for
   every fetch so we occupy exactly one panel device slot. Never mint a fresh HWID per fetch.
 - **State**: `$XDG_CONFIG_HOME/clash_vless/state.json`, written atomically at 0600 (it holds

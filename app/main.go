@@ -87,41 +87,7 @@ func run(args []string) error {
 		return cmdSubs(st)
 
 	case "main":
-		if len(args) < 2 {
-			return errors.New("usage: clashvless main <vless://...>  (the always-final exit)")
-		}
-		u := strings.TrimSpace(args[1])
-		if _, err := xray.VlessToOutbound(u, "main"); err != nil {
-			return fmt.Errorf("invalid main url: %w", err)
-		}
-		st.MainURL = u
-		if err := st.Save(); err != nil {
-			return err
-		}
-		fmt.Println("✓ direct-exit main stored (T1). XTLS-Vision here is fine.")
-		if strings.Contains(u, "xtls-rprx-vision") {
-			fmt.Println("→  for T2/T3 chaining, add a non-Vision (flow=\"\") user to the SAME node and set:")
-			fmt.Println("   clashvless main-chain <vless://... with flow=\"\">")
-		}
-		return nil
-
-	case "main-chain":
-		if len(args) < 2 {
-			return errors.New("usage: clashvless main-chain <vless://... with flow=\"\">")
-		}
-		u := strings.TrimSpace(args[1])
-		if _, err := xray.VlessToOutbound(u, "main"); err != nil {
-			return fmt.Errorf("invalid url: %w", err)
-		}
-		st.MainChainURL = u
-		if err := st.Save(); err != nil {
-			return err
-		}
-		fmt.Println("✓ chained-exit main stored (used for T2/T3).")
-		if strings.Contains(u, "xtls-rprx-vision") {
-			fmt.Println("⚠  this uses XTLS-Vision — chaining will fail; it must be a flow=\"\" user.")
-		}
-		return nil
+		return cmdMain(st, args[1:])
 
 	case "whoami":
 		printDevice(st)
@@ -158,8 +124,9 @@ func run(args []string) error {
 		fmt.Println("  add <url>        add a subscription (fetches it)")
 		fmt.Println("  subs             list subscriptions")
 		fmt.Println("  rm <index>       remove a subscription")
-		fmt.Println("  main <vless://>       set the direct exit (T1, Vision OK)")
-		fmt.Println("  main-chain <vless://> set the chained exit (T2/T3, must be flow=\"\")")
+		fmt.Println("  main                  list final-exit mains")
+		fmt.Println("  main add <vless://>   add a main (Vision → direct/T1, plain → hop/T2)")
+		fmt.Println("  main rm <index>       remove a main")
 		fmt.Println("  fetch            refetch all subscriptions")
 		fmt.Println("  list             show active nodes (two pools)")
 		fmt.Println("  gen [entry]      print the xray config for main, optionally chained via a cached node")
@@ -222,8 +189,8 @@ func cmdUp(st *store.State, args []string) error {
 // cmdRun runs the failover supervisor: it keeps the single local port served by
 // the best available tier and re-evaluates continuously (failover + recovery).
 func cmdRun(st *store.State, debug bool) error {
-	if st.MainURL == "" {
-		return errors.New("no main set — run: clashvless main <vless://...>")
+	if len(st.DirectMains()) == 0 && len(st.HopMains()) == 0 {
+		return errors.New("no enabled main — add one: clashvless main add <vless://...>")
 	}
 	if len(st.ActiveNodes()) == 0 {
 		fmt.Println("note: no cached nodes — only T1 (direct main) is possible until you add/fetch a sub.")
@@ -256,36 +223,46 @@ func printStatus(s engine.Status) {
 	if s.Note != "" {
 		note = "   " + s.Note
 	}
+	main := s.Main
+	if main == "" {
+		main = "main"
+	}
 	switch s.Tier {
 	case 0:
 		fmt.Printf("[%s] ✖ DOWN — %s%s\n", ts, s.Err, note)
 	case 1:
-		fmt.Printf("[%s] ● T1  direct → main            egress %dms%s\n", ts, s.Egress.Milliseconds(), note)
+		fmt.Printf("[%s] ● T1  direct → %-16s egress %dms%s\n", ts, trunc(main, 16), s.Egress.Milliseconds(), note)
 	default:
-		fmt.Printf("[%s] ● T%d  %s → main   egress %dms%s\n", ts, s.Tier, s.Entry, s.Egress.Milliseconds(), note)
+		fmt.Printf("[%s] ● T%d  %s → %s   egress %dms%s\n", ts, s.Tier, s.Entry, trunc(main, 16), s.Egress.Milliseconds(), note)
 	}
 }
 
-// tierConfig resolves the main outbound and (optionally) an entry outbound from
-// the first arg (a cached-node name substring). No arg = T1 direct.
+// tierConfig resolves a main outbound and (optionally) an entry outbound from the
+// first arg (a cached-node name substring). No arg = direct via the first enabled
+// w/o-hop main; with an entry = the first enabled hop-capable (non-Vision) main.
 func tierConfig(st *store.State, args []string) (mainOB, entryOB json.RawMessage, label string, err error) {
-	if st.MainURL == "" {
-		return nil, nil, "", errors.New("no main set — run: clashvless main <vless://...>")
+	chained := len(args) >= 1 && strings.TrimSpace(args[0]) != ""
+	mains := st.DirectMains()
+	if chained {
+		mains = st.HopMains()
 	}
-	label = "direct (T1)"
-	mainURL := st.MainURL
-	if len(args) >= 1 && strings.TrimSpace(args[0]) != "" {
+	if len(mains) == 0 {
+		if chained {
+			return nil, nil, "", errors.New("no enabled hop-capable (non-Vision) main — add one: clashvless main add <vless://...>")
+		}
+		return nil, nil, "", errors.New("no enabled direct (w/o-hop) main — add one: clashvless main add <vless://...>")
+	}
+	m := mains[0]
+	label = "direct (T1) · " + m.Name
+	if chained {
 		n := findNode(st, args[0])
 		if n == nil {
 			return nil, nil, "", fmt.Errorf("no cached node matches %q (fetch first, or try a country/ОБХОД substring)", args[0])
 		}
 		entryOB = n.Outbound
-		label = n.Name
-		if st.MainChainURL != "" {
-			mainURL = st.MainChainURL // chained → non-Vision exit
-		}
+		label = n.Name + " → " + m.Name
 	}
-	mainOB, err = xray.VlessToOutbound(mainURL, "main")
+	mainOB, err = xray.VlessToOutbound(m.URL, "main")
 	if err != nil {
 		return nil, nil, "", err
 	}
@@ -365,6 +342,80 @@ func cmdSubs(st *store.State) error {
 			active = "►"
 		}
 		fmt.Printf("  %s [%d] %-26s %d nodes\n", active, i, st.Subs[i].Name, len(st.Subs[i].Nodes))
+	}
+	return nil
+}
+
+// cmdMain lists, adds, or removes final-exit mains.
+func cmdMain(st *store.State, args []string) error {
+	if len(args) == 0 {
+		return listMains(st)
+	}
+	switch args[0] {
+	case "add":
+		if len(args) < 2 {
+			return errors.New("usage: clashvless main add <vless://...>")
+		}
+		return addMainCLI(st, args[1])
+	case "rm", "remove", "del":
+		if len(args) < 2 {
+			return errors.New("usage: clashvless main rm <index>")
+		}
+		i, err := strconv.Atoi(args[1])
+		if err != nil {
+			return fmt.Errorf("invalid index %q", args[1])
+		}
+		st.RemoveMain(i)
+		if err := st.Save(); err != nil {
+			return err
+		}
+		return listMains(st)
+	default:
+		return addMainCLI(st, args[0]) // bare `main <vless://>` = add
+	}
+}
+
+func addMainCLI(st *store.State, u string) error {
+	u = strings.TrimSpace(u)
+	if _, err := xray.VlessToOutbound(u, "main"); err != nil {
+		return fmt.Errorf("invalid vless url: %w", err)
+	}
+	st.AddMain(u)
+	if err := st.Save(); err != nil {
+		return err
+	}
+	fmt.Printf("✓ added — %s\n", mainModeHint(u))
+	return listMains(st)
+}
+
+func mainModeHint(u string) string {
+	if store.IsVision(u) {
+		return "Vision → direct/T1 (w/o-hop on)"
+	}
+	return "plain → hop/T2 by default (toggle w/o-hop in the Main tab to allow direct)"
+}
+
+func listMains(st *store.State) error {
+	if len(st.Mains) == 0 {
+		fmt.Println("no mains — add one: clashvless main add <vless://...>")
+		return nil
+	}
+	fmt.Println("mains (final exits):")
+	for i := range st.Mains {
+		m := st.Mains[i]
+		en := "✗"
+		if m.Enabled {
+			en = "✓"
+		}
+		mode := "hop-only"
+		if m.AllowNoHop {
+			mode = "direct-ok"
+		}
+		vis := ""
+		if store.IsVision(m.URL) {
+			vis = "  [vision]"
+		}
+		fmt.Printf("  [%d] %s enabled  %-26s  %s%s\n", i, en, trunc(m.Name, 26), mode, vis)
 	}
 	return nil
 }
