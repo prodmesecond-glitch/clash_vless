@@ -14,8 +14,12 @@ with automatic tiered failover.
   - `internal/engine` — embeds xray-core in-process; the failover supervisor + real-egress pool probe.
   - `internal/control` — daemon↔client IPC over a Unix socket: `run` serves it; `tui`/`status` attach.
   - `internal/tui` — Bubble Tea dashboard client (Status / Subs / Main / Log / Config).
-  - `cmd/xhserver` — local test rig: a Vision-reality hop + xhttp-reality exit server, to prove a
-    client config direct (T1) and hopped (T2). Separate `main` (pulls in vless/inbound); not in the app binary.
+  - `cmd/xhserver` — local test rig: Vision-reality hop (`:9001`) + xhttp-reality exit (`:9002`) +
+    plain-reality (non-Vision) hop (`:9003`), to point a client config at (direct T1 / hopped T2).
+    Separate `main` (pulls in vless/inbound); not in the app binary.
+  - `cmd/xhprobe` — self-contained chaining-mechanism probe: stands up exit+hops and dials them
+    via every method (`proxySettings` vs `sockopt.dialerProxy`, xhttp/tcp × Vision/non-Vision),
+    printing PASS/FAIL. Proves why chaining uses dialerProxy; re-run after any xray-core bump.
 - `app/vendor/` — vendored deps (committed; builds are hermetic/offline).
 - `dist/` — prebuilt release binaries (**not committed**; build artifacts).
 
@@ -45,9 +49,14 @@ See the default-case help block in `main.go` for the full list.
   probes use a throwaway OS-assigned port (`engine.freePort()`), never a fixed one.
 - **Force-hop** (`store.ForceHop`): skip T1 and always route through a hop (tier bounds → 2..3) —
   a quick "is any hop working?" test that keeps the hop-1 port served. `PinTier`/`PinEntry` still override.
-- **Chaining trick** (`xray.BuildConfig`): a chained `main` dials through the entry via
-  outbound `proxySettings.tag`, and its XTLS flow is stripped — Vision only works on a
-  direct hop, so a hopped main must be a `flow=""` (non-Vision) user.
+- **Chaining trick** (`xray.BuildConfig`): a chained `main` dials through the entry via outbound
+  `proxySettings.tag`, and its XTLS flow is stripped — a hopped main must be `flow=""` (non-Vision).
+- **What can be hopped** (see README matrix + `cmd/xhprobe` lab): a **plain** main (`security=none`,
+  e.g. `plain-444`) hops through **any** entry. A main with **its own REALITY** (xhttp / tcp-reality)
+  can only hop through a **non-Vision** entry — a Vision entry splices/pads the stream and mangles the
+  main's inner reality handshake (the exit then serves its real camouflage cert →
+  `REALITY: received real certificate`). Vision mains are direct-only. (The `dialerProxy` experiment
+  of the reverted v0.8.x didn't change this — the blocker is Vision on the entry, not the mechanism.)
 - **Device identity** (`store.Device`): one stable HWID + Happ User-Agent is reused for
   every fetch so we occupy exactly one panel device slot. Never mint a fresh HWID per fetch.
 - **State**: `$XDG_CONFIG_HOME/clash_vless/state.json`, written atomically at 0600 (it holds
@@ -60,16 +69,17 @@ See the default-case help block in `main.go` for the full list.
   `redactSecrets` in `main.go`.
 - Keep code comments minimal: only a line for a constraint the code itself can't show.
 
-## Context rule (IMPORTANT)
-`context.md` at the repo root is the living design / working-notes doc. It is **local and
-untracked** (git-ignored). **Update `context.md` as part of every commit**: before committing
-a change, refresh `context.md` so it reflects the new state. Never stage or commit `context.md`.
+## Doc rule (IMPORTANT)
+This `CLAUDE.md` is the single living design doc — tracked, so it travels with the code.
+**Update it as part of every commit**: before committing a change, refresh the relevant section
+so the guide reflects the new state. (There is no separate `context.md` — it was dropped so the
+working notes stay in the tracked file and sync across machines.)
 
 ## Version rule (IMPORTANT)
 **Every commit MUST bump `store.Version`** (`app/internal/store/store.go`) — it shows in the TUI
 header and the `version` command. Claude picks the semver part by the change: **major** = breaking /
 incompatible; **minor** = a new feature; **patch** / sub-minor = a fix, tweak, docs, or meta change.
-Bump it as part of the commit, alongside the `context.md` refresh.
+Bump it as part of the commit, alongside the `CLAUDE.md` refresh.
 
 ## Scratch rule
 Throwaway/runtime files (extra `--config` profiles, logs, scratch) go in the git-ignored `tmp/`

@@ -84,6 +84,33 @@ Hysteresis prevents flapping: it only switches **up** to a better tier after it 
 cycles, and only switches **down** after the live chain fails a few. `Pin tier`, `Pin entry`, and
 `Force hop` override the automatic cascade.
 
+## What can be hopped (connection matrix)
+
+A hopped chain is **you → entry (hop) → main (exit)**. Whether it carries traffic depends on the
+**exit's security** and the **entry's flow**. Verified on real hardware unless marked; `cmd/xhprobe`
+is a local lab that stands up the whole topology and reads the actual TLS cert each combo yields.
+
+| Exit (final main)                              | Direct (T1) | via **Vision** hop | via **non‑Vision** hop |
+|------------------------------------------------|:-----------:|:------------------:|:----------------------:|
+| **Plain** — `security=none` (e.g. `plain‑444`) |      ✓      |         ✓          |           ✓            |
+| **Reality** — `security=reality` (xhttp / tcp) |      ✓      |         ✗          |    ⚠️ lab ✓, unconfirmed |
+| **Reality + XTLS‑Vision**                      |  ✓ (only)   |         ✗          |           ✗            |
+
+**Why** — the entry is dialed *directly*, so it keeps its own reality (and Vision, if any); the
+**exit** is what has to survive being relayed through it:
+
+- A **plain** exit carries only ordinary data, so the entry's Vision splices the destination's TLS
+  exactly as designed — it rides through **any** hop. This is the everyday case (a plain exit hopped
+  through a country node).
+- A **reality** exit brings a *second* reality handshake. A **Vision** hop splices/pads that
+  handshake and breaks it — the exit treats you as an unauthenticated probe and forwards you to its
+  real camouflage site, so you get *that* site's cert (`REALITY: received real certificate`). A
+  **non‑Vision** (plain‑reality, e.g. grpc/ws) hop relays it untouched — reality‑over‑reality is fine
+  there (shown in the lab; not yet confirmed on live non‑Vision hardware).
+- **XTLS‑Vision** can't be relayed at all (it needs a direct link), so a Vision exit is direct‑only.
+
+One line: **a Vision hop can carry only a plain exit; a reality exit needs a non‑Vision hop.**
+
 ## State
 
 State lives at `$XDG_CONFIG_HOME/clash_vless/state.json` (outside the repo), written atomically at

@@ -48,9 +48,11 @@ func reality(priv, sid string) map[string]any {
 func main() {
 	privA, pubA := kp() // Vision-reality hop
 	privB, pubB := kp() // xhttp-reality exit
+	privC, pubC := kp() // plain-reality (NON-vision) hop
 	const (
 		uuidA, sidA = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "1111111111111111"
 		uuidB, sidB = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "2222222222222222"
+		uuidC, sidC = "cccccccc-cccc-cccc-cccc-cccccccccccc", "3333333333333333"
 		sni         = "www.cloudflare.com"
 	)
 	cfg := map[string]any{
@@ -63,6 +65,9 @@ func main() {
 				"settings": map[string]any{"clients": []any{map[string]any{"id": uuidB}}, "decryption": "none"},
 				"streamSettings": map[string]any{"network": "xhttp", "security": "reality", "realitySettings": reality(privB, sidB),
 					"xhttpSettings": map[string]any{"path": "/", "mode": "auto"}}},
+			map[string]any{"tag": "hop2", "listen": "127.0.0.1", "port": 9003, "protocol": "vless",
+				"settings":       map[string]any{"clients": []any{map[string]any{"id": uuidC}}, "decryption": "none"},
+				"streamSettings": map[string]any{"network": "tcp", "security": "reality", "realitySettings": reality(privC, sidC)}},
 		},
 		"outbounds": []any{map[string]any{"protocol": "freedom", "tag": "direct"}},
 	}
@@ -76,13 +81,20 @@ func main() {
 
 	entryURL := fmt.Sprintf("vless://%s@127.0.0.1:9001?encryption=none&flow=xtls-rprx-vision&type=tcp&security=reality&sni=%s&fp=chrome&pbk=%s&sid=%s#hop", uuidA, sni, pubA, sidA)
 	exitURL := fmt.Sprintf("vless://%s@127.0.0.1:9002?encryption=none&type=xhttp&security=reality&sni=%s&fp=chrome&pbk=%s&sid=%s&path=/&mode=auto#exit", uuidB, sni, pubB, sidB)
+	entry2URL := fmt.Sprintf("vless://%s@127.0.0.1:9003?encryption=none&type=tcp&security=reality&sni=%s&fp=chrome&pbk=%s&sid=%s#hop2", uuidC, sni, pubC, sidC)
 	entryOB, err := xray.VlessToOutbound(entryURL, "proxy")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "entry outbound:", err)
 		os.Exit(1)
 	}
+	entry2OB, err := xray.VlessToOutbound(entry2URL, "proxy")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "entry2 outbound:", err)
+		os.Exit(1)
+	}
 	fmt.Println("EXIT_URL=" + exitURL)
 	fmt.Println("ENTRY_OUTBOUND=" + string(entryOB))
+	fmt.Println("ENTRY2_OUTBOUND=" + string(entry2OB)) // NON-vision hop
 	fmt.Println("hop(:9001 vision-reality) + exit(:9002 xhttp-reality) up — Ctrl-C to stop")
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)

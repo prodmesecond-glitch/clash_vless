@@ -3,8 +3,11 @@
 //
 // The topology is always: a single local SOCKS inbound, and "main" as the final
 // outbound. When main is not directly reachable we insert an entry hop and have
-// main DIAL THROUGH it via streamSettings.sockopt.dialerProxy — which keeps
-// main's Reality/TLS handshake end-to-end (a plain SOCKS hop would break it).
+// main DIAL THROUGH it via outbound proxySettings.tag — which keeps main's
+// Reality/TLS handshake end-to-end (a plain SOCKS hop would break it). Only a
+// plain (security=none) main hops cleanly; a main with its own REALITY needs a
+// non-Vision entry (a Vision entry mangles the inner reality handshake) — see the
+// README connection matrix and cmd/xhprobe.
 package xray
 
 import (
