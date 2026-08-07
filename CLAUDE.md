@@ -62,3 +62,13 @@ See the default-case help block in `main.go` for the full list.
 `context.md` at the repo root is the living design / working-notes doc. It is **local and
 untracked** (git-ignored). **Update `context.md` as part of every commit**: before committing
 a change, refresh `context.md` so it reflects the new state. Never stage or commit `context.md`.
+
+## Version rule (IMPORTANT)
+**Every commit MUST bump `store.Version`** (`app/internal/store/store.go`) — it shows in the TUI
+header and the `version` command. Claude picks the semver part by the change: **major** = breaking /
+incompatible; **minor** = a new feature; **patch** / sub-minor = a fix, tweak, docs, or meta change.
+Bump it as part of the commit, alongside the `context.md` refresh.
+
+## Scratch rule
+Throwaway/runtime files (extra `--config` profiles, logs, scratch) go in the git-ignored `tmp/`
+subdir at the repo root — keep them out of `$XDG_CONFIG_HOME` and out of commits.

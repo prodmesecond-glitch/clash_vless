@@ -6,6 +6,9 @@
 # Local working notes — kept untracked (see CLAUDE.md)
 /context.md
 
+# Scratch: throwaway --config profiles, logs (see CLAUDE.md scratch rule)
+/tmp/
+
 # Runtime / debug output
 events.log
 *.tmp
