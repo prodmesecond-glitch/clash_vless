@@ -115,6 +115,9 @@ func run(args []string) error {
 	case "fetch-proxy":
 		return cmdFetchProxy(st, args[1:])
 
+	case "loglevel", "log-level":
+		return cmdLoglevel(st, args[1:])
+
 	case "list":
 		nodes := st.ActiveNodes()
 		if len(nodes) == 0 {
@@ -155,6 +158,7 @@ func run(args []string) error {
 		fmt.Println("  main rm <index>       remove a main")
 		fmt.Println("  fetch            refetch all subscriptions")
 		fmt.Println("  fetch-proxy [host:port|off]  fetch subs through a SOCKS5 proxy (e.g. 127.0.0.1:2084)")
+		fmt.Println("  loglevel [none|error|warning|info|debug]  xray log verbosity")
 		fmt.Println("  list             show active nodes (two pools)")
 		fmt.Println("  gen [entry]      print the xray config for main, optionally chained via a cached node")
 		fmt.Println("  up [entry]       start xray in-process (chained via [entry] also exposes hop-1 on its own port)")
@@ -173,7 +177,7 @@ func cmdGen(st *store.State, args []string) error {
 	if err != nil {
 		return err
 	}
-	cfg, err := xray.BuildConfig(st.ListenPort, mainOB, entryOB, st.EntryListenPort(), false, st.ListenHost())
+	cfg, err := xray.BuildConfig(st.ListenPort, mainOB, entryOB, st.EntryListenPort(), st.Loglevel(), st.ListenHost())
 	if err != nil {
 		return err
 	}
@@ -191,7 +195,7 @@ func cmdUp(st *store.State, args []string) error {
 	if err != nil {
 		return err
 	}
-	cfg, err := xray.BuildConfig(st.ListenPort, mainOB, entryOB, st.EntryListenPort(), false, st.ListenHost())
+	cfg, err := xray.BuildConfig(st.ListenPort, mainOB, entryOB, st.EntryListenPort(), st.Loglevel(), st.ListenHost())
 	if err != nil {
 		return err
 	}
@@ -386,6 +390,25 @@ func cmdFetch(st *store.State) error {
 		fmt.Printf("  %-26s %d nodes\n", st.Subs[i].Name, len(nodes))
 	}
 	return st.Save()
+}
+
+// cmdLoglevel shows or sets the embedded xray log verbosity.
+func cmdLoglevel(st *store.State, args []string) error {
+	if len(args) == 0 {
+		fmt.Println("log level:", st.Loglevel(), "  (none|error|warning|info|debug)")
+		return nil
+	}
+	switch lvl := strings.ToLower(strings.TrimSpace(args[0])); lvl {
+	case "none", "error", "warning", "info", "debug":
+		st.LogLevel = lvl
+	default:
+		return fmt.Errorf("invalid level %q (use: none|error|warning|info|debug)", args[0])
+	}
+	if err := st.Save(); err != nil {
+		return err
+	}
+	fmt.Println("log level:", st.Loglevel(), "— restart the daemon (or re-run `up`) to apply")
+	return nil
 }
 
 // cmdFetchProxy shows or sets the SOCKS5 proxy used for subscription fetches.

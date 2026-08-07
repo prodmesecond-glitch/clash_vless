@@ -24,7 +24,7 @@ go -C app run . [command]                   # run from source
 go -C app build ./...                        # compile-check every package
 ```
 `run` starts the blocking daemon; `tui`/`status` attach to it as clients. Key commands: `add <url>`,
-`fetch`, `fetch-proxy [host:port|off]`, `main add <vless://>`, `up [entry]`, `run`, `whoami`.
+`fetch`, `fetch-proxy [host:port|off]`, `loglevel [level]`, `main add <vless://>`, `up [entry]`, `run`, `whoami`.
 See the default-case help block in `main.go` for the full list.
 
 ## Architecture essentials

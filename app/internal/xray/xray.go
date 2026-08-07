@@ -107,7 +107,7 @@ func VlessToOutbound(uri, tag string) (json.RawMessage, error) {
 // BuildConfig assembles a full xray config: a single SOCKS inbound on port, and
 // main as the final outbound. If entry is non-nil, main is dialed through it
 // (entry → main); otherwise main is used directly (T1).
-func BuildConfig(port int, main, entry json.RawMessage, entryPort int, quiet bool, listen string) (json.RawMessage, error) {
+func BuildConfig(port int, main, entry json.RawMessage, entryPort int, logLevel, listen string) (json.RawMessage, error) {
 	var mainM map[string]any
 	if err := json.Unmarshal(main, &mainM); err != nil {
 		return nil, fmt.Errorf("main outbound: %w", err)
@@ -150,12 +150,12 @@ func BuildConfig(port int, main, entry json.RawMessage, entryPort int, quiet boo
 		}
 	}
 
-	logLevel := "warning"
-	if quiet {
-		logLevel = "none" // keep the embedded core silent (e.g. under the TUI)
+	ll := logLevel // "" defaults to warning; probes pass "none" to stay silent
+	if ll == "" {
+		ll = "warning"
 	}
 	cfg := map[string]any{
-		"log":       map[string]any{"loglevel": logLevel},
+		"log":       map[string]any{"loglevel": ll},
 		"inbounds":  inbounds,
 		"outbounds": outbounds,
 		"routing":   map[string]any{"rules": rules},

@@ -413,6 +413,7 @@ var cfgFields = []cfgField{
 		}
 	}, 0, 1, onOff, "off = localhost only; restart to apply"},
 	{"First-hop port", func(st *store.State) int { return st.EntryPort }, func(st *store.State, v int) { st.EntryPort = v }, 0, 65535, entryPortLabel, "0 = auto (listen+1); restart to apply"},
+	{"Log level", func(st *store.State) int { return logLevelIdx(st.Loglevel()) }, func(st *store.State, v int) { st.LogLevel = logLevels[clamp(v, 0, len(logLevels)-1)] }, 0, 4, logLevelLabel, "xray verbosity; restart daemon to apply"},
 	{"Use fetch proxy", func(st *store.State) int { return b2i(st.UseFetchProxy) }, func(st *store.State, v int) { st.UseFetchProxy = v != 0 }, 0, 1, onOff, "fetch subs via the proxy below"},
 }
 
@@ -935,6 +936,24 @@ func onOff(v int) string {
 		return "on"
 	}
 	return "off"
+}
+
+var logLevels = []string{"none", "error", "warning", "info", "debug"}
+
+func logLevelIdx(l string) int {
+	for i, x := range logLevels {
+		if x == l {
+			return i
+		}
+	}
+	return 2 // warning
+}
+
+func logLevelLabel(v int) string {
+	if v >= 0 && v < len(logLevels) {
+		return logLevels[v]
+	}
+	return "warning"
 }
 
 func trunc(s string, n int) string {

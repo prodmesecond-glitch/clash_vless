@@ -78,6 +78,7 @@ type State struct {
 	ForceHop      bool   `json:"force_hop"` // skip T1 direct — always route through a hop (T2/T3)
 	FetchProxy    string `json:"fetch_proxy"`     // host:port SOCKS5 proxy for subscription fetches
 	UseFetchProxy bool   `json:"use_fetch_proxy"` // route fetches through FetchProxy
+	LogLevel      string `json:"log_level"`       // xray verbosity: none|error|warning|info|debug ("" = warning)
 
 	// legacy fields, migrated into Subs / Mains on load.
 	LegacyURL       string    `json:"subscription_url,omitempty"`
@@ -93,7 +94,7 @@ type State struct {
 const DefaultUA = "Happ/3.13.0"
 
 // Version is the app version, shown in the TUI header and `version` command.
-const Version = "0.6.0"
+const Version = "0.7.0"
 
 func Dir() (string, error) {
 	base, err := os.UserConfigDir()
@@ -228,6 +229,16 @@ func (s *State) EventsLogPath() string {
 // ControlSocketPath is the daemon's Unix control socket.
 func (s *State) ControlSocketPath() string {
 	return filepath.Join(filepath.Dir(s.path), "control.sock")
+}
+
+// Loglevel returns the xray log verbosity for served instances (default warning).
+func (s *State) Loglevel() string {
+	switch s.LogLevel {
+	case "none", "error", "warning", "info", "debug":
+		return s.LogLevel
+	default:
+		return "warning"
+	}
 }
 
 // FetchProxyAddr returns the SOCKS5 proxy subscriptions should be fetched

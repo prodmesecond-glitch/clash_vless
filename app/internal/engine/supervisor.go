@@ -154,6 +154,11 @@ func (s *Supervisor) cfgBool(get func(*store.State) bool) bool {
 	return get(s.st)
 }
 
+// loglevel is the configured xray verbosity for the live (served) instance.
+func (s *Supervisor) loglevel() string {
+	return s.cfgStr(func(st *store.State) string { return st.Loglevel() })
+}
+
 func (s *Supervisor) interval() time.Duration {
 	if v := s.cfgInt(func(st *store.State) int { return st.Interval }); v > 0 {
 		return time.Duration(v) * time.Second
@@ -288,7 +293,7 @@ func (s *Supervisor) speedProbe(ctx context.Context, ob json.RawMessage) (float6
 	if err != nil {
 		return 0, false
 	}
-	cfg, err := xray.BuildConfig(port, ob, nil, 0, true, "127.0.0.1")
+	cfg, err := xray.BuildConfig(port, ob, nil, 0, "none", "127.0.0.1")
 	if err != nil {
 		return 0, false
 	}
@@ -435,7 +440,7 @@ func (s *Supervisor) pinnedCycle(ctx context.Context, hopOB []namedOB, pin strin
 	if node.Whitelist {
 		tier = 3
 	}
-	cfg, err := xray.BuildConfig(s.mainPort, m.ob, node.Outbound, s.entryPort, true, s.listen)
+	cfg, err := xray.BuildConfig(s.mainPort, m.ob, node.Outbound, s.entryPort, s.loglevel(), s.listen)
 	if err != nil {
 		s.emit(0, "", 0, err.Error(), "")
 		return
@@ -493,7 +498,7 @@ func (s *Supervisor) probeTier(ctx context.Context, directOB, hopOB []namedOB, t
 	if tier == 1 { // direct: each w/o-hop main (Vision OK), first that egresses
 		for _, m := range directOB {
 			if lat, ok := s.probe(ctx, m.ob, nil, s.timeout()); ok {
-				cfg, err := xray.BuildConfig(s.mainPort, m.ob, nil, 0, true, s.listen)
+				cfg, err := xray.BuildConfig(s.mainPort, m.ob, nil, 0, s.loglevel(), s.listen)
 				if err != nil {
 					continue
 				}
@@ -515,7 +520,7 @@ func (s *Supervisor) probeTier(ctx context.Context, directOB, hopOB []namedOB, t
 				break
 			}
 			if lat, ok := s.probe(ctx, m.ob, n.Outbound, s.timeout()); ok {
-				cfg, err := xray.BuildConfig(s.mainPort, m.ob, n.Outbound, s.entryPort, true, s.listen)
+				cfg, err := xray.BuildConfig(s.mainPort, m.ob, n.Outbound, s.entryPort, s.loglevel(), s.listen)
 				if err != nil {
 					continue
 				}
@@ -616,7 +621,7 @@ func (s *Supervisor) probe(ctx context.Context, mainOB, entryOB json.RawMessage,
 	if err != nil {
 		return 0, false
 	}
-	cfg, err := xray.BuildConfig(port, mainOB, entryOB, 0, true, "127.0.0.1") // probes stay local
+	cfg, err := xray.BuildConfig(port, mainOB, entryOB, 0, "none", "127.0.0.1") // probes stay local + silent
 	if err != nil {
 		return 0, false
 	}
