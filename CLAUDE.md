@@ -14,6 +14,8 @@ with automatic tiered failover.
   - `internal/engine` — embeds xray-core in-process; the failover supervisor + real-egress pool probe.
   - `internal/control` — daemon↔client IPC over a Unix socket: `run` serves it; `tui`/`status` attach.
   - `internal/tui` — Bubble Tea dashboard client (Status / Subs / Main / Log / Config).
+  - `cmd/xhserver` — local test rig: a Vision-reality hop + xhttp-reality exit server, to prove a
+    client config direct (T1) and hopped (T2). Separate `main` (pulls in vless/inbound); not in the app binary.
 - `app/vendor/` — vendored deps (committed; builds are hermetic/offline).
 - `dist/` — prebuilt release binaries (**not committed**; build artifacts).
 
