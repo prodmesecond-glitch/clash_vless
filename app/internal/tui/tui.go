@@ -46,6 +46,7 @@ const (
 	inputAddSub
 	inputAddMain
 	inputEditCfg
+	inputEditStr
 )
 
 type model struct {
@@ -183,6 +184,9 @@ func (m *model) handleInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if v, err := strconv.Atoi(strings.TrimSpace(raw)); err == nil {
 				m.setCfg(m.cfgCursor, v)
 			}
+		case inputEditStr:
+			m.apply(func(st *store.State) { st.FetchProxy = strings.TrimSpace(raw) })
+			m.busy = "saved ✓"
 		}
 	case tea.KeyBackspace, tea.KeyDelete:
 		if r := []rune(m.inputBuf); len(r) > 0 {
@@ -301,21 +305,30 @@ func (m *model) subRows() []subRow {
 }
 
 func (m *model) handleConfigKey(msg tea.KeyMsg) {
+	proxyRow := len(cfgFields) // the one free-text row lives just past the int fields
 	switch msg.String() {
 	case "up", "k":
 		if m.cfgCursor > 0 {
 			m.cfgCursor--
 		}
 	case "down", "j":
-		if m.cfgCursor < len(cfgFields)-1 {
+		if m.cfgCursor < proxyRow {
 			m.cfgCursor++
 		}
 	case "left", "h", "-":
-		m.setCfg(m.cfgCursor, cfgFields[m.cfgCursor].get(m.st)-1)
+		if m.cfgCursor < proxyRow {
+			m.setCfg(m.cfgCursor, cfgFields[m.cfgCursor].get(m.st)-1)
+		}
 	case "right", "l", "+", "=":
-		m.setCfg(m.cfgCursor, cfgFields[m.cfgCursor].get(m.st)+1)
+		if m.cfgCursor < proxyRow {
+			m.setCfg(m.cfgCursor, cfgFields[m.cfgCursor].get(m.st)+1)
+		}
 	case "enter":
-		m.inputMode, m.inputBuf, m.busy = inputEditCfg, "", "type a value, Enter to save"
+		if m.cfgCursor == proxyRow {
+			m.inputMode, m.inputBuf, m.busy = inputEditStr, m.st.FetchProxy, "type host:port, Enter to save"
+		} else {
+			m.inputMode, m.inputBuf, m.busy = inputEditCfg, "", "type a value, Enter to save"
+		}
 	}
 }
 
@@ -400,6 +413,7 @@ var cfgFields = []cfgField{
 		}
 	}, 0, 1, onOff, "off = localhost only; restart to apply"},
 	{"First-hop port", func(st *store.State) int { return st.EntryPort }, func(st *store.State, v int) { st.EntryPort = v }, 0, 65535, entryPortLabel, "0 = auto (listen+1); restart to apply"},
+	{"Use fetch proxy", func(st *store.State) int { return b2i(st.UseFetchProxy) }, func(st *store.State, v int) { st.UseFetchProxy = v != 0 }, 0, 1, onOff, "fetch subs via the proxy below"},
 }
 
 // --- styles ------------------------------------------------------------------
@@ -753,6 +767,20 @@ func (m *model) configView() string {
 			line += dimStyle.Render("   " + f.note)
 		}
 		b.WriteString(line + "\n")
+	}
+	// Fetch proxy — the one free-text (host:port) setting.
+	pi := len(cfgFields)
+	shown := m.st.FetchProxy
+	if m.inputMode == inputEditStr && m.cfgCursor == pi {
+		shown = m.inputBuf + "▏"
+	} else if shown == "" {
+		shown = "(unset)"
+	}
+	label := fmt.Sprintf("%-20s", "Fetch proxy")
+	if m.cfgCursor == pi {
+		b.WriteString(activeStyle.Render(fmt.Sprintf("▸ %s %s", label, shown)) + dimStyle.Render("   host:port (SOCKS5)") + "\n")
+	} else {
+		b.WriteString(fmt.Sprintf("  %s ", label) + dimStyle.Render(shown+"   host:port (SOCKS5)") + "\n")
 	}
 	return b.String()
 }

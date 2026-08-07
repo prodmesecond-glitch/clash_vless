@@ -76,6 +76,8 @@ type State struct {
 	PinTier       int    `json:"pin_tier"`
 	PinEntry      string `json:"pin_entry"` // pinned entry node name ("" = auto-select)
 	ForceHop      bool   `json:"force_hop"` // skip T1 direct — always route through a hop (T2/T3)
+	FetchProxy    string `json:"fetch_proxy"`     // host:port SOCKS5 proxy for subscription fetches
+	UseFetchProxy bool   `json:"use_fetch_proxy"` // route fetches through FetchProxy
 
 	// legacy fields, migrated into Subs / Mains on load.
 	LegacyURL       string    `json:"subscription_url,omitempty"`
@@ -226,6 +228,15 @@ func (s *State) EventsLogPath() string {
 // ControlSocketPath is the daemon's Unix control socket.
 func (s *State) ControlSocketPath() string {
 	return filepath.Join(filepath.Dir(s.path), "control.sock")
+}
+
+// FetchProxyAddr returns the SOCKS5 proxy subscriptions should be fetched
+// through, or "" when disabled/unset.
+func (s *State) FetchProxyAddr() string {
+	if s.UseFetchProxy && s.FetchProxy != "" {
+		return s.FetchProxy
+	}
+	return ""
 }
 
 // EntryListenPort is the local SOCKS port the current first hop (entry node) is

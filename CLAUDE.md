@@ -8,10 +8,12 @@ with automatic tiered failover.
 - `app/` — the Go module (`module clashvless`, Go 1.26). All source lives here.
   - `main.go` — CLI entrypoint + command dispatch.
   - `internal/store` — on-disk state (subs, cached nodes, stable device identity, tunables).
-  - `internal/happ` — fetches a Remnawave sub while mimicking the Happ 3.x client; parses nodes.
+  - `internal/happ` — fetches a Remnawave sub (Happ 3.x mimic; optional SOCKS5 fetch proxy); parses
+    base64 / URI-list / xray-JSON, building a `vless://` outbound for URI-list nodes so they're usable.
   - `internal/xray` — `vless://` → xray outbound, and full-config assembly (incl. entry→main chaining).
-  - `internal/engine` — embeds xray-core in-process; the failover supervisor + probes.
-  - `internal/tui` — Bubble Tea dashboard (Status / Subs / Main / Log / Config).
+  - `internal/engine` — embeds xray-core in-process; the failover supervisor + real-egress pool probe.
+  - `internal/control` — daemon↔client IPC over a Unix socket: `run` serves it; `tui`/`status` attach.
+  - `internal/tui` — Bubble Tea dashboard client (Status / Subs / Main / Log / Config).
 - `app/vendor/` — vendored deps (committed; builds are hermetic/offline).
 - `dist/` — prebuilt release binaries (**not committed**; build artifacts).
 
@@ -21,8 +23,8 @@ go -C app build -o ../dist/clashvless .     # build the single binary
 go -C app run . [command]                   # run from source
 go -C app build ./...                        # compile-check every package
 ```
-Bare `clashvless` (or `tui`) launches the dashboard. Key commands: `add <url>`,
-`fetch`, `main add <vless://>`, `up [entry]`, `run`, `whoami`.
+`run` starts the blocking daemon; `tui`/`status` attach to it as clients. Key commands: `add <url>`,
+`fetch`, `fetch-proxy [host:port|off]`, `main add <vless://>`, `up [entry]`, `run`, `whoami`.
 See the default-case help block in `main.go` for the full list.
 
 ## Architecture essentials

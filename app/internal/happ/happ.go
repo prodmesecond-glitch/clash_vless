@@ -8,18 +8,23 @@ package happ
 
 import (
 	"bufio"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
+	"golang.org/x/net/proxy"
+
 	"clashvless/internal/store"
+	"clashvless/internal/xray"
 )
 
 // ErrDeviceLimit means the panel rejected our HWID because the account's device
@@ -28,7 +33,9 @@ var ErrDeviceLimit = errors.New("device limit reached: free a slot in the panel/
 
 // Fetch pulls a subscription URL using the given device identity and returns the
 // parsed nodes plus the panel's profile title (used to name the subscription).
-func Fetch(device store.Device, subURL string) ([]store.Node, string, error) {
+// proxyAddr (host:port), when non-empty, routes the request through that SOCKS5
+// proxy — useful when the panel host itself is censored.
+func Fetch(device store.Device, subURL, proxyAddr string) ([]store.Node, string, error) {
 	subURL = strings.TrimSpace(subURL)
 	if subURL == "" {
 		return nil, "", errors.New("empty subscription URL")
@@ -45,10 +52,17 @@ func Fetch(device store.Device, subURL string) ([]store.Node, string, error) {
 	req.Header.Set("X-Device-Model", device.Model)
 	req.Header.Set("X-Device-Locale", device.Locale)
 
-	client := &http.Client{
-		Timeout:   30 * time.Second,
-		Transport: &http.Transport{Proxy: http.ProxyFromEnvironment},
+	tr := &http.Transport{Proxy: http.ProxyFromEnvironment}
+	if proxyAddr = strings.TrimSpace(proxyAddr); proxyAddr != "" {
+		d, err := proxy.SOCKS5("tcp", proxyAddr, nil, &net.Dialer{Timeout: 15 * time.Second})
+		if err != nil {
+			return nil, "", fmt.Errorf("fetch proxy %s: %w", proxyAddr, err)
+		}
+		tr = &http.Transport{DialContext: func(_ context.Context, network, addr string) (net.Conn, error) {
+			return d.Dial(network, addr)
+		}}
 	}
+	client := &http.Client{Timeout: 30 * time.Second, Transport: tr}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, "", err
@@ -152,14 +166,22 @@ func parseURI(uri string) (store.Node, bool) {
 		port, _ := strconv.Atoi(u.Port())
 		name, _ := url.QueryUnescape(u.Fragment)
 		name = strings.TrimSpace(name)
-		return store.Node{
+		n := store.Node{
 			Raw:       uri,
 			Name:      name,
 			Protocol:  scheme,
 			Server:    host,
 			Port:      port,
 			Whitelist: IsBypass(name),
-		}, true
+		}
+		// Build the xray outbound so URI-list nodes are actually usable (probed
+		// and chainable), not just listed. The embedded core only speaks vless.
+		if scheme == "vless" {
+			if ob, err := xray.VlessToOutbound(uri, "proxy"); err == nil {
+				n.Outbound = ob
+			}
+		}
+		return n, true
 	default:
 		return store.Node{}, false
 	}

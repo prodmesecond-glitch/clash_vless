@@ -112,6 +112,9 @@ func run(args []string) error {
 	case "fetch":
 		return cmdFetch(st)
 
+	case "fetch-proxy":
+		return cmdFetchProxy(st, args[1:])
+
 	case "list":
 		nodes := st.ActiveNodes()
 		if len(nodes) == 0 {
@@ -151,6 +154,7 @@ func run(args []string) error {
 		fmt.Println("  main add <vless://>   add a main (Vision → direct/T1, plain → hop/T2)")
 		fmt.Println("  main rm <index>       remove a main")
 		fmt.Println("  fetch            refetch all subscriptions")
+		fmt.Println("  fetch-proxy [host:port|off]  fetch subs through a SOCKS5 proxy (e.g. 127.0.0.1:2084)")
 		fmt.Println("  list             show active nodes (two pools)")
 		fmt.Println("  gen [entry]      print the xray config for main, optionally chained via a cached node")
 		fmt.Println("  up [entry]       start xray in-process (chained via [entry] also exposes hop-1 on its own port)")
@@ -345,7 +349,7 @@ func cmdAdd(st *store.State, u string) error {
 	if !happ.ValidSubURL(u) {
 		return fmt.Errorf("invalid subscription URL (need http(s)://…): %q", u)
 	}
-	nodes, title, err := happ.Fetch(st.Device, u)
+	nodes, title, err := happ.Fetch(st.Device, u, st.FetchProxyAddr())
 	st.AddSub(title, u)
 	sub := &st.Subs[len(st.Subs)-1]
 	if err == nil {
@@ -369,7 +373,7 @@ func cmdFetch(st *store.State) error {
 		return errors.New("no subs — add one: clashvless add <url>")
 	}
 	for i := range st.Subs {
-		nodes, title, err := happ.Fetch(st.Device, st.Subs[i].URL)
+		nodes, title, err := happ.Fetch(st.Device, st.Subs[i].URL, st.FetchProxyAddr())
 		if err != nil {
 			fmt.Printf("  %-26s %v\n", st.Subs[i].Name, err)
 			continue
@@ -382,6 +386,35 @@ func cmdFetch(st *store.State) error {
 		fmt.Printf("  %-26s %d nodes\n", st.Subs[i].Name, len(nodes))
 	}
 	return st.Save()
+}
+
+// cmdFetchProxy shows or sets the SOCKS5 proxy used for subscription fetches.
+func cmdFetchProxy(st *store.State, args []string) error {
+	if len(args) == 0 {
+		if st.FetchProxy == "" {
+			fmt.Println("fetch proxy: (unset) — set with: clashvless fetch-proxy 127.0.0.1:2084")
+			return nil
+		}
+		state := "off"
+		if st.UseFetchProxy {
+			state = "on"
+		}
+		fmt.Printf("fetch proxy: %s (%s)\n", st.FetchProxy, state)
+		return nil
+	}
+	switch strings.ToLower(strings.TrimSpace(args[0])) {
+	case "off", "disable", "0":
+		st.UseFetchProxy = false
+	case "on", "enable", "1":
+		st.UseFetchProxy = true
+	default:
+		st.FetchProxy = strings.TrimSpace(args[0])
+		st.UseFetchProxy = true
+	}
+	if err := st.Save(); err != nil {
+		return err
+	}
+	return cmdFetchProxy(st, nil)
 }
 
 // cmdSubs lists subscriptions and the current selection mode.

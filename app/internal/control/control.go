@@ -151,14 +151,10 @@ func (s *Server) applyAndBroadcast(mut func(*store.State)) {
 	s.hub.Broadcast(Event{Type: "state", State: s.sup.Snapshot()})
 }
 
-func (s *Server) device() store.Device {
+func (s *Server) addSub(url string) {
 	var st store.State
 	_ = json.Unmarshal(s.sup.Snapshot(), &st)
-	return st.Device
-}
-
-func (s *Server) addSub(url string) {
-	nodes, title, err := happ.Fetch(s.device(), url)
+	nodes, title, err := happ.Fetch(st.Device, url, st.FetchProxyAddr())
 	s.applyAndBroadcast(func(st *store.State) {
 		st.AddSub(title, url)
 		if err == nil {
@@ -186,7 +182,7 @@ func (s *Server) refetch() {
 	}
 	ups := make([]upd, len(st.Subs))
 	for i, sb := range st.Subs {
-		nodes, title, err := happ.Fetch(dev, sb.URL)
+		nodes, title, err := happ.Fetch(dev, sb.URL, st.FetchProxyAddr())
 		ups[i] = upd{sb.URL, title, nodes, err == nil, err}
 	}
 	s.applyAndBroadcast(func(st *store.State) {
