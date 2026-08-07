@@ -13,7 +13,9 @@ with automatic tiered failover.
   - `internal/xray` — `vless://` → xray outbound, and full-config assembly (incl. entry→main chaining).
   - `internal/engine` — embeds xray-core in-process; the failover supervisor + real-egress pool probe.
   - `internal/control` — daemon↔client IPC over a Unix socket: `run` serves it; `tui`/`status` attach.
-  - `internal/tui` — Bubble Tea dashboard client (Status / Subs / Main / Log / Config).
+  - `internal/tui` — Bubble Tea dashboard client (Status / Subs / Main / Log / Config); `wizard.go`
+    is the first-run setup wizard (sub → proxy → HWID → fetch → review → exit, with a non-plain warning).
+    Mains & sub nodes show a proto tag (`store.ProtoTag`/`OutboundProtoTag`: plain·reality·vision·grpc·ws·tls·xhttp).
   - `cmd/xhserver` — local test rig: Vision-reality hop (`:9001`) + xhttp-reality exit (`:9002`) +
     plain-reality (non-Vision) hop (`:9003`), to point a client config at (direct T1 / hopped T2).
     Separate `main` (pulls in vless/inbound); not in the app binary.
@@ -29,9 +31,11 @@ go -C app build -o ../dist/clashvless .     # build the single binary
 go -C app run . [command]                   # run from source
 go -C app build ./...                        # compile-check every package
 ```
-`run` starts the blocking daemon; `tui`/`status` attach to it as clients. Key commands: `add <url>`,
-`fetch`, `fetch-proxy [host:port|off]`, `loglevel [level]`, `main add <vless://>`, `up [entry]`, `run`, `whoami`.
-See the default-case help block in `main.go` for the full list.
+`run` starts the blocking daemon; `tui`/`status` attach to it as clients — but `tui` now **self-starts
+an in-process daemon** if none is running (stops when the TUI exits), so a fresh install needs no shell:
+`clashvless tui` → the setup wizard opens on the empty config. `run` no longer requires a main (idles DOWN).
+Key commands: `add <url>`, `fetch`, `fetch-proxy [host:port|off]`, `loglevel [level]`, `main add <vless://>`,
+`up [entry]`, `run`, `whoami`. See the default-case help block in `main.go` for the full list.
 
 ## Architecture essentials
 - **Topology**: local SOCKS inbound → `main` outbound (the final exit, always).

@@ -44,6 +44,7 @@ type Supervisor struct {
 	mainPort  int
 	entryPort int    // first hop exposed here while chained (0 = disabled)
 	listen    string // bind address for the LIVE local inbound(s)
+	quiet     bool   // force xray silent (TUI-embedded daemon)
 
 	kick chan struct{}
 
@@ -155,9 +156,18 @@ func (s *Supervisor) cfgBool(get func(*store.State) bool) bool {
 }
 
 // loglevel is the configured xray verbosity for the live (served) instance.
+// When quiet (embedded in a TUI) it's forced silent — xray writes to the terminal,
+// which would corrupt the alt-screen.
 func (s *Supervisor) loglevel() string {
+	if s.quiet {
+		return "none"
+	}
 	return s.cfgStr(func(st *store.State) string { return st.Loglevel() })
 }
+
+// SetQuiet silences the served xray instance's logging (call before Run). Used
+// when the daemon runs in-process under the TUI.
+func (s *Supervisor) SetQuiet(q bool) { s.quiet = q }
 
 func (s *Supervisor) interval() time.Duration {
 	if v := s.cfgInt(func(st *store.State) int { return st.Interval }); v > 0 {

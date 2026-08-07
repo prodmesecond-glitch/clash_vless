@@ -157,7 +157,7 @@ func run(args []string) error {
 		fmt.Println("  main add <vless://>   add a main (Vision → direct/T1, plain → hop/T2)")
 		fmt.Println("  main rm <index>       remove a main")
 		fmt.Println("  fetch            refetch all subscriptions")
-		fmt.Println("  fetch-proxy [host:port|off]  fetch subs through a SOCKS5 proxy (e.g. 127.0.0.1:2084)")
+		fmt.Println("  fetch-proxy [addr|off]  fetch subs through a proxy: socks5://h:p, http://h:p, or h:p (socks5)")
 		fmt.Println("  loglevel [none|error|warning|info|debug]  xray log verbosity")
 		fmt.Println("  list             show active nodes (two pools)")
 		fmt.Println("  gen [entry]      print the xray config for main, optionally chained via a cached node")
@@ -221,7 +221,7 @@ func cmdUp(st *store.State, args []string) error {
 // the best available tier and re-evaluates continuously (failover + recovery).
 func cmdRun(st *store.State, debug bool) error {
 	if len(st.DirectMains()) == 0 && len(st.HopMains()) == 0 {
-		return errors.New("no enabled main — add one: clashvless main add <vless://...>")
+		fmt.Println("note: no main yet — the daemon will idle (DOWN). Open the TUI to run setup: clashvless tui")
 	}
 	if len(st.ActiveNodes()) == 0 {
 		fmt.Println("note: no cached nodes — only T1 (direct main) is possible until you add/fetch a sub.")
@@ -258,14 +258,54 @@ func cmdRun(st *store.State, debug bool) error {
 	return sup.Run(ctx)
 }
 
-// runTUI attaches the TUI to a running daemon (explicit — never auto-starts one).
+// runTUI attaches the TUI to a running daemon. If none is running, it starts an
+// in-process one for this session (so the TUI + its setup wizard work on a fresh
+// install); that daemon stops when the TUI exits. For a persistent proxy, run the
+// daemon separately with `clashvless run`.
 func runTUI(st *store.State) error {
-	client, err := control.Dial(st.ControlSocketPath())
-	if err != nil {
-		return fmt.Errorf("no daemon at %s — start it first: clashvless run", st.ControlSocketPath())
+	sock := st.ControlSocketPath()
+	// Attach to a standalone `run` daemon if its control socket is up; otherwise
+	// start an in-process one for this session.
+	if client, err := control.Dial(sock); err == nil {
+		defer client.Close()
+		return tui.RunClient(client, false)
+	}
+	stop := startEmbeddedDaemon(st)
+	defer stop()
+	client := dialRetry(sock, 5*time.Second)
+	if client == nil {
+		return fmt.Errorf("could not start an in-process daemon on %s", sock)
 	}
 	defer client.Close()
-	return tui.RunClient(client)
+	return tui.RunClient(client, true)
+}
+
+// startEmbeddedDaemon runs the supervisor + control server in-process with silent
+// sinks (output goes to the TUI over the socket, not stdout). Returns a stop func.
+func startEmbeddedDaemon(st *store.State) func() {
+	engine.SetLogSink(func(string) {}) // xray-core must not write to the terminal (TUI owns it)
+	ctx, cancel := context.WithCancel(context.Background())
+	hub := control.NewHub()
+	onLog := func(l string) { hub.Broadcast(control.Event{Type: "log", Line: l}) }
+	onStatus := func(s engine.Status) { hub.Broadcast(control.Event{Type: "status", Status: &s}) }
+	sup := engine.NewSupervisor(st, onStatus, onLog)
+	sup.SetQuiet(true) // xray must not write to the terminal — the TUI owns the screen
+	_ = os.Remove(st.ControlSocketPath()) // clear any stale socket (no live daemon — Dial failed)
+	go func() { _ = control.NewServer(sup, hub).Serve(ctx, st.ControlSocketPath()) }()
+	go func() { _ = sup.Run(ctx) }()
+	return cancel
+}
+
+// dialRetry polls the control socket until it accepts or the deadline passes.
+func dialRetry(sock string, d time.Duration) *control.Client {
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		if c, err := control.Dial(sock); err == nil {
+			return c
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return nil
 }
 
 // cmdStatus prints one status snapshot from the running daemon.

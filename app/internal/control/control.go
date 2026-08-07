@@ -201,8 +201,17 @@ func (s *Server) refetch() {
 			}
 		}
 	})
+	if len(ups) == 0 {
+		s.hub.Broadcast(Event{Type: "log", Line: "refetch: no subscriptions to fetch"})
+	}
 	for _, u := range ups {
-		if !u.ok {
+		if u.ok {
+			name := u.title
+			if name == "" {
+				name = u.url
+			}
+			s.hub.Broadcast(Event{Type: "log", Line: fmt.Sprintf("refetched %q — %d nodes", name, len(u.nodes))})
+		} else {
 			s.hub.Broadcast(Event{Type: "log", Line: fmt.Sprintf("refetch %s: %v", u.url, u.err)})
 		}
 	}

@@ -41,16 +41,37 @@ go -C app build -o ../dist/clashvless .
 
 ## Quick start
 
+Just open the dashboard — on a fresh install it runs a **guided setup** (add sub → fetch → add exit),
+no shell needed:
+
 ```sh
-clashvless add '<subscription-url>'     # add a Remnawave sub (fetches its nodes)
-clashvless main add '<vless://…>'        # add a final exit (Vision → direct, plain → hop)
-clashvless                               # launch the TUI dashboard
+clashvless                               # or: clashvless tui
 ```
 
-Then point your apps at `socks5://127.0.0.1:2084`. For a headless engine instead of the TUI:
+Then point your apps at `socks5://127.0.0.1:2084`.
+
+### Two ways to run
+
+The TUI checks whether a daemon's control socket is already up: if so it **attaches** to it; if not it
+**starts its own engine in-process** for the session. Pick whichever fits:
+
+**1. Interactive.** The engine lives inside the TUI and stops when you close it — simplest, good for
+setup and occasional use. The header shows `· embedded`.
+```sh
+clashvless                               # TUI + its own engine
+```
+
+**2. Persistent daemon.** Keep the proxy serving after you close the dashboard (background / service).
+The header shows `· daemon`.
+```sh
+clashvless run                           # blocking daemon: SOCKS + control socket, auto T1→T2→T3
+clashvless tui                           # attaches to it  (or `clashvless status` for a one-shot)
+```
+`run` idles even with no exit yet — open the TUI to set one up. Prefer the shell? You still can:
 
 ```sh
-clashvless run                           # auto T1→T2→T3 failover, keep-alive
+clashvless add '<subscription-url>'      # add a sub (fetches its nodes)
+clashvless main add '<vless://…>'         # add a final exit (plain hops freely — see the matrix below)
 ```
 
 ### Commands

@@ -52,6 +52,7 @@ const (
 type model struct {
 	st        *store.State
 	client    *control.Client
+	embedded  bool // true = this TUI started its own in-process daemon (no standalone `run`)
 	status    engine.Status
 	logs      []string
 	width     int
@@ -66,12 +67,22 @@ type model struct {
 	inputBuf  string
 	busy      string
 	subErr    map[string]string // per-sub last fetch error (transient), keyed by URL
+
+	// first-run setup wizard (see wizard.go)
+	wiz        int
+	wizSeen    bool
+	wizSubURL  string
+	wizMainURL string
+	wizErr     string
+
+	confirmExit bool // showing the "exit? y/n" prompt
 }
 
 // RunClient attaches the TUI to a running daemon over the control socket. It
-// renders state/status/log pushed by the daemon and sends commands back.
-func RunClient(client *control.Client) error {
-	m := &model{client: client, subErr: map[string]string{}, expanded: map[int]bool{}}
+// renders state/status/log pushed by the daemon and sends commands back. embedded
+// records whether the caller started the daemon in-process (vs a standalone `run`).
+func RunClient(client *control.Client, embedded bool) error {
+	m := &model{client: client, embedded: embedded, subErr: map[string]string{}, expanded: map[int]bool{}}
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	go func() {
 		for e := range client.Events() {
@@ -100,15 +111,20 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 	case statusMsg:
 		m.status = engine.Status(msg)
+		m.clearProgress()
 	case logMsg:
 		m.logs = append(m.logs, string(msg))
 		if len(m.logs) > 500 {
 			m.logs = m.logs[len(m.logs)-500:]
 		}
+		m.captureSubErr(string(msg))
 	case stateMsg:
 		var st store.State
 		if json.Unmarshal([]byte(msg), &st) == nil {
 			m.st = &st
+			m.maybeStartWizard()
+			m.wizAdvanceFetch()
+			m.clearProgress()
 		}
 	case daemonGoneMsg:
 		return m, tea.Quit
@@ -121,18 +137,34 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // --- key handling ------------------------------------------------------------
 
 func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// "exit? y/n" prompt takes over the whole UI once armed.
+	if m.confirmExit {
+		switch msg.String() {
+		case "y", "Y", "enter":
+			return m, tea.Quit
+		default:
+			m.confirmExit = false
+		}
+		return m, nil
+	}
+	if msg.String() == "ctrl+c" { // hard exit, always
+		return m, tea.Quit
+	}
+	// `q` is always live to quit — except while typing (where it's a literal char).
+	if msg.String() == "q" && !m.inTextInput() {
+		m.confirmExit = true
+		return m, nil
+	}
+	if m.wiz != wizOff {
+		return m.handleWizardKey(msg)
+	}
 	if m.inputMode != inputNone {
 		return m.handleInput(msg)
 	}
 	if m.st == nil { // not synced from the daemon yet
-		if k := msg.String(); k == "q" || k == "ctrl+c" {
-			return m, tea.Quit
-		}
 		return m, nil
 	}
 	switch msg.String() {
-	case "q", "ctrl+c":
-		return m, tea.Quit
 	case "tab":
 		m.tab = (m.tab + 1) % tabCount
 		return m, nil
@@ -217,6 +249,31 @@ func sanitizeURL(s string) string {
 		}
 	}
 	return strings.TrimSpace(b.String())
+}
+
+// inTextInput reports whether a keypress should be treated as text (so `q` is a
+// literal char, not the quit shortcut).
+func (m *model) inTextInput() bool {
+	if m.inputMode != inputNone {
+		return true
+	}
+	switch m.wiz {
+	case wizSub, wizProxyIn, wizMain, wizHwidIn:
+		return true
+	}
+	return false
+}
+
+// captureSubErr records a failed-fetch reason from the daemon's log ("add <url>:
+// <err>") so it can be shown next to the sub (Subs tab + setup wizard).
+func (m *model) captureSubErr(line string) {
+	rest, ok := strings.CutPrefix(line, "add ")
+	if !ok {
+		return
+	}
+	if i := strings.Index(rest, ": "); i > 0 {
+		m.subErr[rest[:i]] = rest[i+2:]
+	}
 }
 
 func (m *model) handleSubsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -430,13 +487,37 @@ var (
 	activeStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("42"))
 	keyStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("81"))
 	boxStyle     = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("240")).Padding(0, 1)
+	warnStyle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("214")) // calm amber heads-up
+	amberStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))            // proto tag: vision
+	wizBoxStyle  = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("213")).Padding(1, 3)
 )
+
+// protoStyle colours a proto tag by security kind: plain = green (hops anywhere),
+// vision = amber (direct-only), reality/tls = cyan, else dim.
+func protoStyle(tag string) lipgloss.Style {
+	switch {
+	case strings.HasPrefix(tag, "plain"):
+		return okStyle
+	case strings.HasPrefix(tag, "vision"):
+		return amberStyle
+	case strings.HasPrefix(tag, "reality"), strings.HasPrefix(tag, "tls"):
+		return keyStyle
+	default:
+		return dimStyle
+	}
+}
 
 // --- views -------------------------------------------------------------------
 
 func (m *model) View() string {
+	if m.confirmExit {
+		return m.confirmExitView()
+	}
 	if m.st == nil {
 		return "\n  connecting to daemon…  (start it with: clashvless run)\n"
+	}
+	if m.wiz != wizOff {
+		return m.wizardView()
 	}
 	var b strings.Builder
 	b.WriteString(m.header() + "\n\n")
@@ -466,7 +547,11 @@ func (m *model) header() string {
 			parts = append(parts, tabInactive.Render(lbl))
 		}
 	}
-	parts = append(parts, "  "+dimStyle.Render("v"+store.Version))
+	mode := "· daemon"
+	if m.embedded {
+		mode = "· embedded"
+	}
+	parts = append(parts, "  "+dimStyle.Render("v"+store.Version+" "+mode))
 	return lipgloss.JoinHorizontal(lipgloss.Center, parts...)
 }
 
@@ -492,6 +577,14 @@ func (m *model) busySuffix() string {
 		return ""
 	}
 	return "    " + dimStyle.Render(m.busy)
+}
+
+// clearProgress drops an in-progress indicator (a "…" message like "refetching…")
+// once a fresh status/state update lands. Confirmations (no ellipsis) persist.
+func (m *model) clearProgress() {
+	if strings.HasSuffix(m.busy, "…") {
+		m.busy = ""
+	}
 }
 
 func (m *model) statusView() string {
@@ -583,7 +676,9 @@ func (m *model) subsView() string {
 			if m.st.PinEntry == nd.Name {
 				pinMark = activeStyle.Render("📌")
 			}
-			b.WriteString(fmt.Sprintf("%s    %s %-24s %s%s\n", cur, pinMark, trunc(nd.Name, 24), latStr, spdStr))
+			raw := store.OutboundProtoTag(nd.Outbound)
+			tag := protoStyle(raw).Render(fmt.Sprintf("%-13s", raw))
+			b.WriteString(fmt.Sprintf("%s    %s %-24s %s %s%s\n", cur, pinMark, trunc(nd.Name, 24), tag, latStr, spdStr))
 		}
 	}
 	if len(rows) > h {
@@ -652,12 +747,12 @@ func (m *model) mainView() string {
 		if mn.AllowNoHop {
 			hop = "[x]"
 		}
-		vis := ""
-		if store.IsVision(mn.URL) {
-			vis = keyStyle.Render(" vision")
+		tag := ""
+		if raw := store.ProtoTag(mn.URL); raw != "" {
+			tag = "  " + protoStyle(raw).Render(raw)
 		}
 		b.WriteString(fmt.Sprintf("%s%s%-20s %-19s  enable %s  w/o-hop %s%s\n",
-			cur, live, trunc(mn.Name, 20), hostOf(mn.URL), en, hop, vis))
+			cur, live, trunc(mn.Name, 20), hostOf(mn.URL), en, hop, tag))
 	}
 	if m.inputMode == inputAddMain {
 		b.WriteString("\n" + sectionStyle.Render("add main URL: ") + m.inputBuf + "▏")

@@ -76,7 +76,7 @@ type State struct {
 	PinTier       int    `json:"pin_tier"`
 	PinEntry      string `json:"pin_entry"` // pinned entry node name ("" = auto-select)
 	ForceHop      bool   `json:"force_hop"` // skip T1 direct — always route through a hop (T2/T3)
-	FetchProxy    string `json:"fetch_proxy"`     // host:port SOCKS5 proxy for subscription fetches
+	FetchProxy    string `json:"fetch_proxy"`     // proxy for subscription fetches (socks5://, http://, or bare host:port=socks5)
 	UseFetchProxy bool   `json:"use_fetch_proxy"` // route fetches through FetchProxy
 	LogLevel      string `json:"log_level"`       // xray verbosity: none|error|warning|info|debug ("" = warning)
 
@@ -94,7 +94,7 @@ type State struct {
 const DefaultUA = "Happ/3.13.0"
 
 // Version is the app version, shown in the TUI header and `version` command.
-const Version = "0.9.0"
+const Version = "0.10.0"
 
 func Dir() (string, error) {
 	base, err := os.UserConfigDir()
@@ -241,8 +241,8 @@ func (s *State) Loglevel() string {
 	}
 }
 
-// FetchProxyAddr returns the SOCKS5 proxy subscriptions should be fetched
-// through, or "" when disabled/unset.
+// FetchProxyAddr returns the proxy subscriptions should be fetched through
+// (socks5://, http://, or bare host:port), or "" when disabled/unset.
 func (s *State) FetchProxyAddr() string {
 	if s.UseFetchProxy && s.FetchProxy != "" {
 		return s.FetchProxy
@@ -343,6 +343,66 @@ func IsReality(u string) bool {
 	return strings.Contains(u, "security=reality")
 }
 
+// IsPlain reports whether a vless URL is a bare transport — no REALITY/TLS
+// security and no XTLS-Vision flow. Only a plain main hops through ANY entry;
+// a reality/vision main is limited (reality needs a non-Vision hop, Vision is
+// direct-only). See the README connection matrix.
+func IsPlain(u string) bool {
+	return !IsReality(u) && !strings.Contains(u, "security=tls") && !IsVision(u)
+}
+
+// protoLabel formats a compact security·transport tag: "vision", "reality",
+// "reality·grpc", "plain", "tls·ws", … (tcp transport is left implicit).
+func protoLabel(network, security, flow string) string {
+	sec := security
+	switch {
+	case strings.Contains(flow, "xtls-rprx-vision"):
+		sec = "vision"
+	case security == "" || security == "none":
+		sec = "plain"
+	}
+	if network == "" || network == "tcp" {
+		return sec
+	}
+	return sec + "·" + network
+}
+
+// ProtoTag returns the compact proto tag for a vless:// URL (used for mains).
+func ProtoTag(u string) string {
+	p, err := url.Parse(u)
+	if err != nil {
+		return ""
+	}
+	q := p.Query()
+	return protoLabel(q.Get("type"), q.Get("security"), q.Get("flow"))
+}
+
+// OutboundProtoTag returns the compact proto tag for a resolved xray outbound
+// (used for cached sub nodes, which store the built outbound, not a URL).
+func OutboundProtoTag(ob json.RawMessage) string {
+	var o struct {
+		Settings struct {
+			Vnext []struct {
+				Users []struct {
+					Flow string `json:"flow"`
+				} `json:"users"`
+			} `json:"vnext"`
+		} `json:"settings"`
+		StreamSettings struct {
+			Network  string `json:"network"`
+			Security string `json:"security"`
+		} `json:"streamSettings"`
+	}
+	if json.Unmarshal(ob, &o) != nil {
+		return ""
+	}
+	flow := ""
+	if len(o.Settings.Vnext) > 0 && len(o.Settings.Vnext[0].Users) > 0 {
+		flow = o.Settings.Vnext[0].Users[0].Flow
+	}
+	return protoLabel(o.StreamSettings.Network, o.StreamSettings.Security, flow)
+}
+
 // mainName derives a readable label for a main from its URL fragment or host.
 func mainName(u string) string {
 	if p, err := url.Parse(u); err == nil {
@@ -417,6 +477,24 @@ func newHWID() string {
 		panic("clash_vless: cannot read crypto/rand: " + err.Error())
 	}
 	return hex.EncodeToString(b)
+}
+
+// NewHWID mints a fresh stable device id (a new panel device slot).
+func NewHWID() string { return newHWID() }
+
+// ValidHWID reports whether s is an acceptable panel HWID — matches the panel's
+// /^[a-zA-Z0-9=-]{10,64}$/, so a HWID copied from another device is accepted.
+func ValidHWID(s string) bool {
+	if len(s) < 10 || len(s) > 64 {
+		return false
+	}
+	for _, r := range s {
+		ok := r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '=' || r == '-'
+		if !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // subName derives a readable fallback name from a sub URL (its host).

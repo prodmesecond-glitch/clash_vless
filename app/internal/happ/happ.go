@@ -33,8 +33,9 @@ var ErrDeviceLimit = errors.New("device limit reached: free a slot in the panel/
 
 // Fetch pulls a subscription URL using the given device identity and returns the
 // parsed nodes plus the panel's profile title (used to name the subscription).
-// proxyAddr (host:port), when non-empty, routes the request through that SOCKS5
-// proxy — useful when the panel host itself is censored.
+// proxyAddr, when non-empty, routes the request through a proxy — useful when the
+// panel host itself is censored. Accepts `http://host:port`, `https://host:port`,
+// `socks5://host:port`, or a bare `host:port` (treated as SOCKS5).
 func Fetch(device store.Device, subURL, proxyAddr string) ([]store.Node, string, error) {
 	subURL = strings.TrimSpace(subURL)
 	if subURL == "" {
@@ -54,13 +55,23 @@ func Fetch(device store.Device, subURL, proxyAddr string) ([]store.Node, string,
 
 	tr := &http.Transport{Proxy: http.ProxyFromEnvironment}
 	if proxyAddr = strings.TrimSpace(proxyAddr); proxyAddr != "" {
-		d, err := proxy.SOCKS5("tcp", proxyAddr, nil, &net.Dialer{Timeout: 15 * time.Second})
-		if err != nil {
-			return nil, "", fmt.Errorf("fetch proxy %s: %w", proxyAddr, err)
+		switch {
+		case strings.HasPrefix(proxyAddr, "http://"), strings.HasPrefix(proxyAddr, "https://"):
+			u, err := url.Parse(proxyAddr)
+			if err != nil {
+				return nil, "", fmt.Errorf("fetch proxy %s: %w", proxyAddr, err)
+			}
+			tr = &http.Transport{Proxy: http.ProxyURL(u)}
+		default: // socks5://host:port or a bare host:port
+			addr := strings.TrimPrefix(strings.TrimPrefix(proxyAddr, "socks5://"), "socks://")
+			d, err := proxy.SOCKS5("tcp", addr, nil, &net.Dialer{Timeout: 15 * time.Second})
+			if err != nil {
+				return nil, "", fmt.Errorf("fetch proxy %s: %w", proxyAddr, err)
+			}
+			tr = &http.Transport{DialContext: func(_ context.Context, network, addr string) (net.Conn, error) {
+				return d.Dial(network, addr)
+			}}
 		}
-		tr = &http.Transport{DialContext: func(_ context.Context, network, addr string) (net.Conn, error) {
-			return d.Dial(network, addr)
-		}}
 	}
 	client := &http.Client{Timeout: 30 * time.Second, Transport: tr}
 	resp, err := client.Do(req)
