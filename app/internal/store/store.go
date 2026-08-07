@@ -93,7 +93,7 @@ type State struct {
 const DefaultUA = "Happ/3.13.0"
 
 // Version is the app version, shown in the TUI header and `version` command.
-const Version = "0.5.0"
+const Version = "0.6.0"
 
 func Dir() (string, error) {
 	base, err := os.UserConfigDir()
@@ -307,10 +307,10 @@ func (s *State) HopMains() []Main {
 	return out
 }
 
-// AddMain appends a main. New mains are enabled; a Vision exit defaults to
-// direct-only (w/o-hop on), a plain exit defaults to hop-only (w/o-hop off).
+// AddMain appends a main. New mains are enabled; a Vision or REALITY exit defaults
+// to direct-capable (w/o-hop on), a plain exit defaults to hop-only (w/o-hop off).
 func (s *State) AddMain(u string) {
-	s.Mains = append(s.Mains, Main{Name: mainName(u), URL: u, Enabled: true, AllowNoHop: IsVision(u)})
+	s.Mains = append(s.Mains, Main{Name: mainName(u), URL: u, Enabled: true, AllowNoHop: IsVision(u) || IsReality(u)})
 }
 
 // RemoveMain deletes the main at index i.
@@ -324,6 +324,12 @@ func (s *State) RemoveMain(i int) {
 // IsVision reports whether a vless URL uses XTLS-Vision flow (direct-only).
 func IsVision(u string) bool {
 	return strings.Contains(u, "xtls-rprx-vision")
+}
+
+// IsReality reports whether a vless URL uses REALITY security — DPI-resistant,
+// so it works well as a direct exit (T1), not only through a hop.
+func IsReality(u string) bool {
+	return strings.Contains(u, "security=reality")
 }
 
 // mainName derives a readable label for a main from its URL fragment or host.

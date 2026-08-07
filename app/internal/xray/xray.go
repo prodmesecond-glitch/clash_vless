@@ -78,6 +78,15 @@ func VlessToOutbound(uri, tag string) (json.RawMessage, error) {
 		g := map[string]any{}
 		put(g, "serviceName", q.Get("serviceName"))
 		stream["grpcSettings"] = g
+	case "xhttp", "splithttp":
+		xh := map[string]any{}
+		put(xh, "path", q.Get("path"))
+		put(xh, "host", q.Get("host"))
+		put(xh, "mode", q.Get("mode"))
+		if e := q.Get("extra"); e != "" && json.Valid([]byte(e)) {
+			xh["extra"] = json.RawMessage(e) // merged server-side (padding, xmux, …)
+		}
+		stream["xhttpSettings"] = xh
 	}
 
 	ob := map[string]any{

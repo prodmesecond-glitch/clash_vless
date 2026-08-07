@@ -481,10 +481,14 @@ func addMainCLI(st *store.State, u string) error {
 }
 
 func mainModeHint(u string) string {
-	if store.IsVision(u) {
+	switch {
+	case store.IsVision(u):
 		return "Vision → direct/T1 (w/o-hop on)"
+	case store.IsReality(u):
+		return "REALITY → direct/T1 (w/o-hop on)"
+	default:
+		return "plain → hop/T2 by default (toggle w/o-hop in the Main tab to allow direct)"
 	}
-	return "plain → hop/T2 by default (toggle w/o-hop in the Main tab to allow direct)"
 }
 
 func listMains(st *store.State) error {
