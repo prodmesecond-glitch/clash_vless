@@ -19,6 +19,7 @@ type Probe struct {
 	Whitelist bool
 	Latency   time.Duration
 	OK        bool
+	Speed     float64 // Mbps from the last speedtest (0 = not yet tested)
 }
 
 // Status is an immutable snapshot of supervisor state handed to the UI.
@@ -63,6 +64,9 @@ type Supervisor struct {
 	// fastest-first pool ordering for the current cycle.
 	rankedCountry []*store.Node
 	rankedBypass  []*store.Node
+
+	speedMu sync.Mutex
+	speeds  map[string]float64 // Mbps by node name, from the rare speed loop
 }
 
 type plan struct {
@@ -90,6 +94,7 @@ func NewSupervisor(st *store.State, onChange func(Status), onLog func(string)) *
 		kick:      make(chan struct{}, 1),
 		onChange:  onChange,
 		onLog:     onLog,
+		speeds:    map[string]float64{},
 	}
 }
 
@@ -119,6 +124,28 @@ func (s *Supervisor) cfgStr(get func(*store.State) string) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return get(s.st)
+}
+
+// Snapshot returns the current state as JSON (for pushing to control clients).
+func (s *Supervisor) Snapshot() []byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b, _ := json.Marshal(s.st)
+	return b
+}
+
+// Save persists the current state to disk under lock.
+func (s *Supervisor) Save() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.st.Save()
+}
+
+// CurrentStatus returns the latest status snapshot.
+func (s *Supervisor) CurrentStatus() Status {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.status
 }
 
 func (s *Supervisor) cfgBool(get func(*store.State) bool) bool {
@@ -174,6 +201,9 @@ func (s *Supervisor) tierBounds() (lo, hi int) {
 // Run drives the failover loop until ctx is cancelled, then stops serving.
 func (s *Supervisor) Run(ctx context.Context) error {
 	defer s.stopLive()
+	s.refreshPools(ctx) // initial pool health so the first cycle has data
+	go s.poolLoop(ctx)  // keep pool health fresh in the background
+	go s.speedLoop(ctx) // rare auto-speedtest of each node's throughput
 	for {
 		s.cycle(ctx)
 		select {
@@ -183,6 +213,106 @@ func (s *Supervisor) Run(ctx context.Context) error {
 		case <-time.After(s.interval()):
 		}
 	}
+}
+
+// poolLoop refreshes pool health on a slower cadence than the selection cycle,
+// so egress-probing every node doesn't stretch failover response time.
+func (s *Supervisor) poolLoop(ctx context.Context) {
+	t := time.NewTicker(poolRefreshInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			s.refreshPools(ctx)
+		}
+	}
+}
+
+// speedLoop runs a rare, automatic throughput test of every node and caches the
+// result (Mbps by name) for display. Fully decoupled from failover selection.
+func (s *Supervisor) speedLoop(ctx context.Context) {
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(30 * time.Second): // let startup settle before the first sweep
+	}
+	s.runSpeeds(ctx)
+	t := time.NewTicker(speedInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			s.runSpeeds(ctx)
+		}
+	}
+}
+
+// runSpeeds speedtests only the nodes that currently *ping* — the reachable set
+// the pool probe already found (rankedCountry ∪ rankedBypass). Testing a node
+// that can't even egress a 204 just wastes a throwaway xray on a guaranteed miss.
+func (s *Supervisor) runSpeeds(ctx context.Context) {
+	s.mu.Lock()
+	nodes := append(append([]*store.Node(nil), s.rankedCountry...), s.rankedBypass...)
+	s.mu.Unlock()
+	if len(nodes) == 0 {
+		return
+	}
+	s.logf("⚡ speedtest sweep (%d reachable)…", len(nodes))
+	sem := make(chan struct{}, speedConcurrency)
+	var wg sync.WaitGroup
+	for _, n := range nodes {
+		if len(n.Outbound) == 0 {
+			continue
+		}
+		wg.Add(1)
+		go func(n *store.Node) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			if mbps, ok := s.speedProbe(ctx, n.Outbound); ok {
+				s.setSpeed(n.Name, mbps)
+				s.logf("⚡ %s  %.0f Mbps", n.Name, mbps)
+			}
+		}(n)
+	}
+	wg.Wait()
+}
+
+// speedProbe spins a throwaway node-direct xray and measures its throughput.
+func (s *Supervisor) speedProbe(ctx context.Context, ob json.RawMessage) (float64, bool) {
+	port, err := freePort()
+	if err != nil {
+		return 0, false
+	}
+	cfg, err := xray.BuildConfig(port, ob, nil, 0, true, "127.0.0.1")
+	if err != nil {
+		return 0, false
+	}
+	inst, err := Start(cfg)
+	if err != nil {
+		return 0, false
+	}
+	defer inst.Close()
+	if !waitPort(port, 1500*time.Millisecond) {
+		return 0, false
+	}
+	return SpeedThroughSOCKS(ctx, port, speedBudget)
+}
+
+func (s *Supervisor) setSpeed(name string, mbps float64) {
+	s.speedMu.Lock()
+	s.speeds[name] = mbps
+	s.speedMu.Unlock()
+}
+
+func (s *Supervisor) speedOf(name string) float64 {
+	s.speedMu.Lock()
+	defer s.speedMu.Unlock()
+	return s.speeds[name]
 }
 
 // Kick forces an immediate re-evaluation, on top of the interval.
@@ -211,9 +341,6 @@ func (s *Supervisor) cycle(ctx context.Context) {
 		s.emit(0, "", 0, "no usable main — add/enable one in the Main tab", "")
 		return
 	}
-
-	// Refresh pool latencies every cycle (cheap TCP) so the dashboard is live.
-	s.refreshPools()
 
 	// A pinned node overrides the whole cascade (always a chain: entry → hop main).
 	if pin != "" {
@@ -298,7 +425,7 @@ func (s *Supervisor) pinnedCycle(ctx context.Context, hopOB []namedOB, pin strin
 		return
 	}
 	m := hopOB[0]
-	lat, up := s.probe(ctx, m.ob, node.Outbound)
+	lat, up := s.probe(ctx, m.ob, node.Outbound, s.timeout())
 	if !up {
 		s.logf("pinned %s unreachable", pin)
 		s.emit(0, "", 0, "pinned "+pin+" unreachable (unpin for auto)", "")
@@ -365,7 +492,7 @@ func (s *Supervisor) bestWorking(ctx context.Context, directOB, hopOB []namedOB,
 func (s *Supervisor) probeTier(ctx context.Context, directOB, hopOB []namedOB, tier int) (plan, bool) {
 	if tier == 1 { // direct: each w/o-hop main (Vision OK), first that egresses
 		for _, m := range directOB {
-			if lat, ok := s.probe(ctx, m.ob, nil); ok {
+			if lat, ok := s.probe(ctx, m.ob, nil, s.timeout()); ok {
 				cfg, err := xray.BuildConfig(s.mainPort, m.ob, nil, 0, true, s.listen)
 				if err != nil {
 					continue
@@ -376,16 +503,18 @@ func (s *Supervisor) probeTier(ctx context.Context, directOB, hopOB []namedOB, t
 		return plan{}, false
 	}
 	// chained tiers: each hop main behind the fastest working entry of the pool
+	s.mu.Lock()
 	ranked := s.rankedCountry
 	if tier == 3 {
 		ranked = s.rankedBypass
 	}
+	s.mu.Unlock()
 	for _, m := range hopOB {
 		for i, n := range ranked {
 			if i >= maxTryPerTier {
 				break
 			}
-			if lat, ok := s.probe(ctx, m.ob, n.Outbound); ok {
+			if lat, ok := s.probe(ctx, m.ob, n.Outbound, s.timeout()); ok {
 				cfg, err := xray.BuildConfig(s.mainPort, m.ob, n.Outbound, s.entryPort, true, s.listen)
 				if err != nil {
 					continue
@@ -399,14 +528,33 @@ func (s *Supervisor) probeTier(ctx context.Context, directOB, hopOB []namedOB, t
 
 // --- probing -----------------------------------------------------------------
 
-// refreshPools TCP-probes both pools, stores the fastest-first ordering for this
-// cycle, and updates the dashboard latencies.
-func (s *Supervisor) refreshPools() {
-	s.rankedCountry = s.rankPool(false)
-	s.rankedBypass = s.rankPool(true)
+const (
+	poolProbeConcurrency = 10               // max simultaneous pool egress probes
+	poolProbeTimeout     = 8 * time.Second  // match the speed budget: "reachable" == "usable", not "fast"
+	poolRefreshInterval  = 20 * time.Second // background pool-health cadence
+
+	speedInterval    = 15 * time.Minute // rare auto-speedtest cadence
+	speedConcurrency = 4                // max simultaneous speedtests (heavy)
+	speedBudget      = 8 * time.Second  // per-node download window (past slow-start)
+)
+
+// refreshPools egress-probes both pools (a real 204 straight through each node)
+// concurrently, records fastest-first ordering, and updates the dashboard. The
+// latency is honest — a raw TCP connect just measured reaching the node's edge.
+func (s *Supervisor) refreshPools(ctx context.Context) {
+	sem := make(chan struct{}, poolProbeConcurrency)
+	var c, b []*store.Node
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); c = s.rankPool(ctx, false, sem) }()
+	go func() { defer wg.Done(); b = s.rankPool(ctx, true, sem) }()
+	wg.Wait()
+	s.mu.Lock()
+	s.rankedCountry, s.rankedBypass = c, b
+	s.mu.Unlock()
 }
 
-func (s *Supervisor) rankPool(whitelist bool) []*store.Node {
+func (s *Supervisor) rankPool(ctx context.Context, whitelist bool, sem chan struct{}) []*store.Node {
 	s.mu.Lock()
 	all := s.st.ActiveNodes()
 	s.mu.Unlock()
@@ -430,15 +578,17 @@ func (s *Supervisor) rankPool(whitelist bool) []*store.Node {
 		wg.Add(1)
 		go func(i int, n *store.Node) {
 			defer wg.Done()
-			lat, err := TCPLatency(n.Server, n.Port, 3*time.Second)
-			results[i] = res{n: n, lat: lat, ok: err == nil}
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			lat, ok := s.probe(ctx, n.Outbound, nil, poolProbeTimeout) // real 204 through the node
+			results[i] = res{n: n, lat: lat, ok: ok}
 		}(i, n)
 	}
 	wg.Wait()
 
 	probes := make([]Probe, len(results))
 	for i, r := range results {
-		probes[i] = Probe{Name: r.n.Name, Server: r.n.Server, Whitelist: whitelist, Latency: r.lat, OK: r.ok}
+		probes[i] = Probe{Name: r.n.Name, Server: r.n.Server, Whitelist: whitelist, Latency: r.lat, OK: r.ok, Speed: s.speedOf(r.n.Name)}
 	}
 	s.setPool(whitelist, probes)
 
@@ -459,7 +609,7 @@ func (s *Supervisor) rankPool(whitelist bool) []*store.Node {
 
 // probe spins a throwaway xray on the probe port for a candidate (entry nil =
 // T1 direct) and returns whether it reaches the internet + the egress latency.
-func (s *Supervisor) probe(ctx context.Context, mainOB, entryOB json.RawMessage) (time.Duration, bool) {
+func (s *Supervisor) probe(ctx context.Context, mainOB, entryOB json.RawMessage, timeout time.Duration) (time.Duration, bool) {
 	// A fresh OS-assigned port per probe: a fixed ListenPort+1 silently hard-failed
 	// every probe (→ permanent DOWN) whenever another service already held that port.
 	port, err := freePort()
@@ -478,7 +628,7 @@ func (s *Supervisor) probe(ctx context.Context, mainOB, entryOB json.RawMessage)
 	if !waitPort(port, 1500*time.Millisecond) {
 		return 0, false
 	}
-	lat, err := EgressThroughSOCKS(ctx, port, s.timeout())
+	lat, err := EgressThroughSOCKS(ctx, port, timeout)
 	return lat, err == nil
 }
 

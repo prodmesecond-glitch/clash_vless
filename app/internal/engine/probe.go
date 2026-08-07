@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"strconv"
@@ -12,8 +13,44 @@ import (
 )
 
 // egressURL is a tiny 204 endpoint used to prove a chain actually reaches the
-// internet (not just that a TCP hop is up).
-const egressURL = "http://www.gstatic.com/generate_204"
+// internet (not just that a TCP hop is up). HTTPS on 443 (not plain HTTP:80,
+// which some exits filter) so a passing ping matches what real traffic can do.
+const egressURL = "https://cp.cloudflare.com/generate_204"
+
+// speedURL is a large download used for throughput tests (time- and byte-bounded).
+const speedURL = "https://speed.cloudflare.com/__down?bytes=52428800"
+
+// SpeedThroughSOCKS downloads through the SOCKS port for up to budget and returns
+// throughput in Mbps. It's a one-shot, time- and byte-bounded speedtest.
+func SpeedThroughSOCKS(ctx context.Context, socksPort int, budget time.Duration) (float64, bool) {
+	d, err := proxy.SOCKS5("tcp", fmt.Sprintf("127.0.0.1:%d", socksPort), nil, &net.Dialer{Timeout: 5 * time.Second})
+	if err != nil {
+		return 0, false
+	}
+	tr := &http.Transport{
+		DialContext:       func(_ context.Context, network, addr string) (net.Conn, error) { return d.Dial(network, addr) },
+		DisableKeepAlives: true,
+	}
+	client := &http.Client{Transport: tr}
+	dl, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+	req, err := http.NewRequestWithContext(dl, http.MethodGet, speedURL, nil)
+	if err != nil {
+		return 0, false
+	}
+	start := time.Now()
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, false
+	}
+	defer resp.Body.Close()
+	n, _ := io.Copy(io.Discard, resp.Body) // reads until the budget deadline cancels it
+	secs := time.Since(start).Seconds()
+	if n < 1<<16 || secs <= 0 {
+		return 0, false
+	}
+	return float64(n*8) / secs / 1e6, true
+}
 
 // TCPLatency measures how long a raw TCP connect to host:port takes. It's the
 // cheap pre-rank used to try the fastest entries first, before the (costlier)

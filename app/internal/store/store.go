@@ -91,7 +91,7 @@ type State struct {
 const DefaultUA = "Happ/3.13.0"
 
 // Version is the app version, shown in the TUI header and `version` command.
-const Version = "0.3.0"
+const Version = "0.4.0"
 
 func Dir() (string, error) {
 	base, err := os.UserConfigDir()
@@ -221,6 +221,11 @@ func (s *State) RawPath() string {
 // EventsLogPath is where --debug mirrors the supervisor event log.
 func (s *State) EventsLogPath() string {
 	return filepath.Join(filepath.Dir(s.path), "events.log")
+}
+
+// ControlSocketPath is the daemon's Unix control socket.
+func (s *State) ControlSocketPath() string {
+	return filepath.Join(filepath.Dir(s.path), "control.sock")
 }
 
 // EntryListenPort is the local SOCKS port the current first hop (entry node) is

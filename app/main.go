@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	"clashvless/internal/control"
 	"clashvless/internal/engine"
 	"clashvless/internal/happ"
 	"clashvless/internal/store"
@@ -134,8 +135,11 @@ func run(args []string) error {
 		fmt.Println("clashvless " + store.Version)
 		return nil
 
+	case "status":
+		return cmdStatus(st)
+
 	case "tui", "":
-		return tui.Run(st, debug)
+		return runTUI(st)
 
 	default:
 		fmt.Println("clashvless — Happ-gated subscription manager")
@@ -217,12 +221,22 @@ func cmdRun(st *store.State, debug bool) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	onLog := func(l string) { fmt.Println("  ·", l) }
+	hub := control.NewHub()
+	sink := func(l string) { fmt.Println("  ·", l) }
 	if debug {
-		onLog = engine.EventFileSink(st.EventsLogPath(), onLog)
+		sink = engine.EventFileSink(st.EventsLogPath(), sink)
 		fmt.Println("debug: mirroring events →", st.EventsLogPath())
 	}
-	sup := engine.NewSupervisor(st, printStatus, onLog)
+	onLog := func(l string) { sink(l); hub.Broadcast(control.Event{Type: "log", Line: l}) }
+	onStatus := func(s engine.Status) { printStatus(s); hub.Broadcast(control.Event{Type: "status", Status: &s}) }
+
+	sup := engine.NewSupervisor(st, onStatus, onLog)
+	sock := st.ControlSocketPath()
+	go func() {
+		if err := control.NewServer(sup, hub).Serve(ctx, sock); err != nil {
+			fmt.Fprintln(os.Stderr, "control server:", err)
+		}
+	}()
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
@@ -232,8 +246,34 @@ func cmdRun(st *store.State, debug bool) error {
 		cancel()
 	}()
 
-	fmt.Printf("▶ failover engine on socks5://127.0.0.1:%d — Ctrl-C to stop\n", st.ListenPort)
+	fmt.Printf("▶ daemon: socks5://%s:%d · control %s — Ctrl-C to stop\n", st.ListenHost(), st.ListenPort, sock)
 	return sup.Run(ctx)
+}
+
+// runTUI attaches the TUI to a running daemon (explicit — never auto-starts one).
+func runTUI(st *store.State) error {
+	client, err := control.Dial(st.ControlSocketPath())
+	if err != nil {
+		return fmt.Errorf("no daemon at %s — start it first: clashvless run", st.ControlSocketPath())
+	}
+	defer client.Close()
+	return tui.RunClient(client)
+}
+
+// cmdStatus prints one status snapshot from the running daemon.
+func cmdStatus(st *store.State) error {
+	client, err := control.Dial(st.ControlSocketPath())
+	if err != nil {
+		return fmt.Errorf("no daemon running — start it first: clashvless run")
+	}
+	defer client.Close()
+	for e := range client.Events() {
+		if e.Type == "status" && e.Status != nil {
+			printStatus(*e.Status)
+			return nil
+		}
+	}
+	return nil
 }
 
 func printStatus(s engine.Status) {

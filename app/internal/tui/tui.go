@@ -7,8 +7,8 @@
 package tui
 
 import (
-	"context"
-	"errors"
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -18,6 +18,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"clashvless/internal/control"
 	"clashvless/internal/engine"
 	"clashvless/internal/happ"
 	"clashvless/internal/store"
@@ -26,22 +27,8 @@ import (
 
 type statusMsg engine.Status
 type logMsg string
-
-type fetchResult struct {
-	url, title string
-	nodes      []store.Node
-	ok         bool
-	errMsg     string
-}
-type fetchDoneMsg struct {
-	results []fetchResult
-	total   int
-}
-type subAddedMsg struct {
-	url, name string
-	nodes     []store.Node
-	err       error
-}
+type stateMsg json.RawMessage
+type daemonGoneMsg struct{}
 
 const (
 	tabStatus = iota
@@ -63,7 +50,7 @@ const (
 
 type model struct {
 	st        *store.State
-	sup       *engine.Supervisor
+	client    *control.Client
 	status    engine.Status
 	logs      []string
 	width     int
@@ -80,24 +67,27 @@ type model struct {
 	subErr    map[string]string // per-sub last fetch error (transient), keyed by URL
 }
 
-// Run launches the tabbed TUI. When debug is set, supervisor events are also
-// mirrored to events.log.
-func Run(st *store.State, debug bool) error {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	m := &model{st: st, subErr: map[string]string{}, expanded: map[int]bool{}}
+// RunClient attaches the TUI to a running daemon over the control socket. It
+// renders state/status/log pushed by the daemon and sends commands back.
+func RunClient(client *control.Client) error {
+	m := &model{client: client, subErr: map[string]string{}, expanded: map[int]bool{}}
 	p := tea.NewProgram(m, tea.WithAltScreen())
-
-	base := func(l string) { p.Send(logMsg(l)) }
-	if debug {
-		base = engine.EventFileSink(st.EventsLogPath(), base)
-	}
-	m.sup = engine.NewSupervisor(st, func(s engine.Status) { p.Send(statusMsg(s)) }, base)
-	go func() { _ = m.sup.Run(ctx) }()
-
+	go func() {
+		for e := range client.Events() {
+			switch e.Type {
+			case "status":
+				if e.Status != nil {
+					p.Send(statusMsg(*e.Status))
+				}
+			case "log":
+				p.Send(logMsg(e.Line))
+			case "state":
+				p.Send(stateMsg(e.State))
+			}
+		}
+		p.Send(daemonGoneMsg{})
+	}()
 	_, err := p.Run()
-	cancel()
 	return err
 }
 
@@ -114,10 +104,13 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if len(m.logs) > 500 {
 			m.logs = m.logs[len(m.logs)-500:]
 		}
-	case fetchDoneMsg:
-		m.applyFetch(msg)
-	case subAddedMsg:
-		m.applyAdd(msg)
+	case stateMsg:
+		var st store.State
+		if json.Unmarshal([]byte(msg), &st) == nil {
+			m.st = &st
+		}
+	case daemonGoneMsg:
+		return m, tea.Quit
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	}
@@ -129,6 +122,12 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.inputMode != inputNone {
 		return m.handleInput(msg)
+	}
+	if m.st == nil { // not synced from the daemon yet
+		if k := msg.String(); k == "q" || k == "ctrl+c" {
+			return m, tea.Quit
+		}
+		return m, nil
 	}
 	switch msg.String() {
 	case "q", "ctrl+c":
@@ -144,9 +143,10 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "r":
 		m.busy = "refetching…"
-		return m, m.fetchCmd()
+		_ = m.client.Send(control.Command{Cmd: "refetch"})
+		return m, nil
 	case "f":
-		m.sup.Kick()
+		_ = m.client.Send(control.Command{Cmd: "kick"})
 		m.busy = "re-evaluating…"
 		return m, nil
 	}
@@ -176,7 +176,7 @@ func (m *model) handleInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.busy = "adding…"
-			return m, m.addCmd(u)
+			_ = m.client.Send(control.Command{Cmd: "addsub", URL: u})
 		case inputAddMain:
 			m.addMain(sanitizeURL(raw))
 		case inputEditCfg:
@@ -248,24 +248,18 @@ func (m *model) handleSubsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "s": // use this sub as the active one (manual mode)
 		if len(rows) > 0 {
 			i := r.sub
-			m.sup.SetConfig(func(st *store.State) { st.AutoSelect = false; st.ActiveSub = i })
-			_ = m.st.Save()
-			m.sup.Kick()
+			m.apply(func(st *store.State) { st.AutoSelect = false; st.ActiveSub = i })
 			m.busy = "using " + trunc(m.st.Subs[i].Name, 20)
 		}
 	case "d":
 		if len(rows) > 0 && r.node < 0 {
 			i := r.sub
-			m.sup.SetConfig(func(st *store.State) { st.RemoveSub(i) })
+			_ = m.client.Send(control.Command{Cmd: "rmsub", Index: i})
 			delete(m.expanded, i)
-			_ = m.st.Save()
-			m.sup.Kick()
 			m.busy = "removed"
 		}
 	case " ", "space":
-		m.sup.SetConfig(func(st *store.State) { st.AutoSelect = !st.AutoSelect })
-		_ = m.st.Save()
-		m.sup.Kick()
+		m.apply(func(st *store.State) { st.AutoSelect = !st.AutoSelect })
 	}
 	return m, nil
 }
@@ -276,19 +270,18 @@ func (m *model) pinNode(subIdx, nodeIdx int) {
 		return
 	}
 	name := m.st.Subs[subIdx].Nodes[nodeIdx].Name
-	m.sup.SetConfig(func(st *store.State) {
+	willPin := m.st.PinEntry != name
+	m.apply(func(st *store.State) {
 		if st.PinEntry == name {
 			st.PinEntry = ""
 		} else {
 			st.PinEntry = name
 		}
 	})
-	_ = m.st.Save()
-	m.sup.Kick()
-	if m.st.PinEntry == name {
-		m.busy = "pinned " + trunc(name, 20)
+	if willPin {
+		m.busy = "using " + trunc(name, 20) + " as hop"
 	} else {
-		m.busy = "unpinned — auto"
+		m.busy = "auto hop (unpinned)"
 	}
 }
 
@@ -329,85 +322,42 @@ func (m *model) handleConfigKey(msg tea.KeyMsg) {
 func (m *model) setCfg(i, v int) {
 	f := cfgFields[i]
 	v = clamp(v, f.min, f.max)
-	m.sup.SetConfig(func(st *store.State) { f.set(st, v) })
-	_ = m.st.Save()
+	m.apply(func(st *store.State) { f.set(st, v) })
 	m.busy = "saved ✓"
 }
 
-// --- commands (run in tea goroutines; only touch snapshots) ------------------
+// --- daemon commands ---------------------------------------------------------
 
-func (m *model) fetchCmd() tea.Cmd {
-	subs := append([]store.Subscription(nil), m.st.Subs...)
-	device := m.st.Device
-	return func() tea.Msg {
-		res := make([]fetchResult, len(subs))
-		total := 0
-		for i, sb := range subs {
-			nodes, title, err := happ.Fetch(device, sb.URL)
-			res[i] = fetchResult{url: sb.URL, title: title, nodes: nodes, ok: err == nil, errMsg: fetchErrMsg(err)}
-			if err == nil {
-				total += len(nodes)
-			}
-		}
-		return fetchDoneMsg{results: res, total: total}
+// apply computes the delta from mut and sends it to the daemon as a patch — only
+// the changed top-level fields, so it never clobbers daemon-fetched nodes.
+func (m *model) apply(mut func(*store.State)) {
+	if m.st == nil {
+		return
 	}
+	var cp store.State
+	b, _ := json.Marshal(m.st)
+	_ = json.Unmarshal(b, &cp)
+	mut(&cp)
+	_ = m.client.SendPatch(statePatch(m.st, &cp))
 }
 
-func (m *model) addCmd(u string) tea.Cmd {
-	device := m.st.Device
-	return func() tea.Msg {
-		nodes, title, err := happ.Fetch(device, u)
-		return subAddedMsg{url: u, name: title, nodes: nodes, err: err}
+func statePatch(a, b *store.State) json.RawMessage {
+	fa, fb := stateFields(a), stateFields(b)
+	out := map[string]json.RawMessage{}
+	for k, vb := range fb {
+		if !bytes.Equal(fa[k], vb) {
+			out[k] = vb
+		}
 	}
+	j, _ := json.Marshal(out)
+	return j
 }
 
-func (m *model) applyFetch(msg fetchDoneMsg) {
-	m.sup.SetConfig(func(st *store.State) {
-		for _, r := range msg.results {
-			if !r.ok {
-				continue
-			}
-			for i := range st.Subs {
-				if st.Subs[i].URL == r.url {
-					st.Subs[i].Nodes = r.nodes
-					st.Subs[i].LastFetch = time.Now()
-					if r.title != "" {
-						st.Subs[i].Name = r.title
-					}
-				}
-			}
-		}
-	})
-	_ = m.st.Save()
-	m.sup.Kick()
-	for _, r := range msg.results {
-		if r.ok {
-			delete(m.subErr, r.url)
-		} else {
-			m.subErr[r.url] = r.errMsg
-		}
-	}
-	m.busy = fmt.Sprintf("refetched %d nodes", msg.total)
-}
-
-func (m *model) applyAdd(msg subAddedMsg) {
-	m.sup.SetConfig(func(st *store.State) {
-		st.AddSub(msg.name, msg.url)
-		if msg.err == nil {
-			sb := &st.Subs[len(st.Subs)-1]
-			sb.Nodes = msg.nodes
-			sb.LastFetch = time.Now()
-		}
-	})
-	_ = m.st.Save()
-	m.sup.Kick()
-	if msg.err != nil {
-		m.subErr[msg.url] = fetchErrMsg(msg.err)
-		m.busy = "added — " + fetchErrMsg(msg.err)
-	} else {
-		delete(m.subErr, msg.url)
-		m.busy = fmt.Sprintf("added %d nodes", len(msg.nodes))
-	}
+func stateFields(s *store.State) map[string]json.RawMessage {
+	b, _ := json.Marshal(s)
+	var mm map[string]json.RawMessage
+	_ = json.Unmarshal(b, &mm)
+	return mm
 }
 
 // --- config fields -----------------------------------------------------------
@@ -470,6 +420,9 @@ var (
 // --- views -------------------------------------------------------------------
 
 func (m *model) View() string {
+	if m.st == nil {
+		return "\n  connecting to daemon…  (start it with: clashvless run)\n"
+	}
 	var b strings.Builder
 	b.WriteString(m.header() + "\n\n")
 	switch m.tab {
@@ -509,7 +462,7 @@ func (m *model) footer() string {
 	var ctx string
 	switch m.tab {
 	case tabSubs:
-		ctx = keyStyle.Render("a") + " add  " + keyStyle.Render("enter") + " expand/pin  " + keyStyle.Render("s") + " use-sub  " + keyStyle.Render("d") + " del  " + keyStyle.Render("space") + " auto  "
+		ctx = keyStyle.Render("a") + " add  " + keyStyle.Render("enter") + " expand / use-as-hop  " + keyStyle.Render("s") + " use-sub  " + keyStyle.Render("d") + " del  " + keyStyle.Render("space") + " auto  "
 	case tabMain:
 		ctx = keyStyle.Render("a") + " add  " + keyStyle.Render("e") + " enable  " + keyStyle.Render("w") + " w/o-hop  " + keyStyle.Render("d") + " del  "
 	case tabConfig:
@@ -524,16 +477,6 @@ func (m *model) busySuffix() string {
 		return ""
 	}
 	return "    " + dimStyle.Render(m.busy)
-}
-
-func fetchErrMsg(err error) string {
-	if err == nil {
-		return ""
-	}
-	if errors.Is(err, happ.ErrDeviceLimit) {
-		return "device limit — free a slot & refetch"
-	}
-	return trunc(err.Error(), 40)
 }
 
 func (m *model) statusView() string {
@@ -610,18 +553,22 @@ func (m *model) subsView() string {
 		} else { // node under an expanded sub
 			nd := &m.st.Subs[r.sub].Nodes[r.node]
 			latStr := dimStyle.Render("   —  ")
+			spdStr := ""
 			if p, ok := lat[nd.Name]; ok {
 				if p.OK {
 					latStr = fmt.Sprintf("%5dms", p.Latency.Milliseconds())
 				} else {
 					latStr = badStyle.Render("   ×  ")
 				}
+				if p.Speed > 0 {
+					spdStr = dimStyle.Render(fmt.Sprintf("  %4.0f Mbps", p.Speed))
+				}
 			}
 			pinMark := "  "
 			if m.st.PinEntry == nd.Name {
 				pinMark = activeStyle.Render("📌")
 			}
-			b.WriteString(fmt.Sprintf("%s    %s %-24s %s\n", cur, pinMark, trunc(nd.Name, 24), latStr))
+			b.WriteString(fmt.Sprintf("%s    %s %-24s %s%s\n", cur, pinMark, trunc(nd.Name, 24), latStr, spdStr))
 		}
 	}
 	if len(rows) > h {
@@ -728,9 +675,7 @@ func (m *model) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "d":
 		if n > 0 {
 			i := m.mainCursor
-			m.sup.SetConfig(func(st *store.State) { st.RemoveMain(i) })
-			_ = m.st.Save()
-			m.sup.Kick()
+			m.apply(func(st *store.State) { st.RemoveMain(i) })
 			m.busy = "removed"
 		}
 	}
@@ -738,7 +683,7 @@ func (m *model) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *model) toggleMain(i int, enable bool) {
-	m.sup.SetConfig(func(st *store.State) {
+	m.apply(func(st *store.State) {
 		if i < 0 || i >= len(st.Mains) {
 			return
 		}
@@ -748,8 +693,6 @@ func (m *model) toggleMain(i int, enable bool) {
 			st.Mains[i].AllowNoHop = !st.Mains[i].AllowNoHop
 		}
 	})
-	_ = m.st.Save()
-	m.sup.Kick()
 	m.busy = "saved ✓"
 }
 
@@ -758,9 +701,7 @@ func (m *model) addMain(u string) {
 		m.busy = "invalid vless:// URL"
 		return
 	}
-	m.sup.SetConfig(func(st *store.State) { st.AddMain(u) })
-	_ = m.st.Save()
-	m.sup.Kick()
+	m.apply(func(st *store.State) { st.AddMain(u) })
 	m.busy = "main added"
 }
 
