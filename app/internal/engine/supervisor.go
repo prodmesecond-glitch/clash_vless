@@ -4,11 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
+	"net/url"
 	"sort"
 	"sync"
 	"time"
 
 	"clashvless/internal/store"
+	"clashvless/internal/tun"
 	"clashvless/internal/xray"
 )
 
@@ -68,6 +71,13 @@ type Supervisor struct {
 
 	speedMu sync.Mutex
 	speeds  map[string]float64 // Mbps by node name, from the rare speed loop
+
+	// TUN mode (touched only from the single Run goroutine). The bridge is a
+	// persistent tun→local-SOCKS instance so failover never churns the device.
+	bridge *Instance
+	tunMgr *tun.Manager
+	tunOn  bool
+	tunErr bool // last bring-up failed; don't respin until toggled off
 }
 
 type plan struct {
@@ -87,7 +97,7 @@ func NewSupervisor(st *store.State, onChange func(Status), onLog func(string)) *
 	if entryPort == st.ListenPort {
 		entryPort = 0 // would collide with the main port — don't expose
 	}
-	return &Supervisor{
+	s := &Supervisor{
 		st:        st,
 		mainPort:  st.ListenPort,
 		entryPort: entryPort,
@@ -97,6 +107,8 @@ func NewSupervisor(st *store.State, onChange func(Status), onLog func(string)) *
 		onLog:     onLog,
 		speeds:    map[string]float64{},
 	}
+	s.tunMgr = tun.New(s.logf)
+	return s
 }
 
 func (s *Supervisor) logf(format string, a ...any) {
@@ -216,10 +228,12 @@ func (s *Supervisor) tierBounds() (lo, hi int) {
 // Run drives the failover loop until ctx is cancelled, then stops serving.
 func (s *Supervisor) Run(ctx context.Context) error {
 	defer s.stopLive()
+	defer s.tunDown()   // restore routing/DNS + stop the bridge on shutdown
 	s.refreshPools(ctx) // initial pool health so the first cycle has data
 	go s.poolLoop(ctx)  // keep pool health fresh in the background
 	go s.speedLoop(ctx) // rare auto-speedtest of each node's throughput
 	for {
+		s.syncTun(ctx) // bring TUN mode up/down to match config
 		s.cycle(ctx)
 		select {
 		case <-ctx.Done():
@@ -660,6 +674,8 @@ func (s *Supervisor) apply(p plan) error {
 		_ = old.Close()
 	}
 
+	// In TUN mode p.config is already decorated by BuildConfig (SO_MARK on every
+	// dial + static hosts), so no special handling is needed here.
 	var inst *Instance
 	var err error
 	for attempt := 0; attempt < 3; attempt++ {
@@ -725,4 +741,153 @@ func (s *Supervisor) emit(tier int, entry string, egress time.Duration, errStr, 
 	if cb != nil {
 		cb(snap)
 	}
+}
+
+// --- TUN mode ----------------------------------------------------------------
+
+// syncTun brings TUN mode up or down to match the stored TunEnabled flag. Called
+// once per cycle from the single Run goroutine, so bridge/tun state needs no lock.
+// A failed bring-up latches (tunErr) so it doesn't respin until toggled off.
+func (s *Supervisor) syncTun(ctx context.Context) {
+	want := s.cfgBool(func(st *store.State) bool { return st.TunEnabled })
+	switch {
+	case want && !s.tunOn && !s.tunErr:
+		if err := s.tunUp(); err != nil {
+			s.tunErr = true
+			s.logf("TUN: %v", err)
+			cur := s.CurrentStatus()
+			s.emit(cur.Tier, cur.Entry, cur.Egress, "TUN: "+err.Error(), cur.Note)
+		}
+	case !want && (s.tunOn || s.tunErr):
+		s.tunDown()
+	}
+}
+
+// tunUp starts the persistent bridge instance (which owns the TUN device) and
+// applies the OS-level routing/DNS around it.
+func (s *Supervisor) tunUp() error {
+	if !tun.Supported() {
+		return fmt.Errorf("TUN mode is only supported on Linux, Windows, and macOS")
+	}
+	if !tun.Privileged() {
+		return fmt.Errorf("needs root/Administrator — run the daemon elevated (e.g. `sudo clashvless run`)")
+	}
+
+	name := s.cfgStr(func(st *store.State) string { return st.TunName })
+	if name == "" {
+		name = tun.DefaultName()
+	}
+	mtu := s.cfgInt(func(st *store.State) int { return st.TunMTUOr() })
+	addr := s.cfgStr(func(st *store.State) string { return st.TunAddress() })
+	dns := s.cfgStr(func(st *store.State) string { return st.TunResolver() })
+
+	// Resolve every server host on the real network (before the tunnel captures
+	// the default route): the IPs for the Windows/macOS bypass list, and a
+	// domain→IP map for static hosts (so an exit's own domain resolves locally).
+	ips, hosts := s.tunResolveAll()
+	mark := tun.FwMark()
+
+	// From now on BuildConfig decorates every config (live + probes): SO_MARK so
+	// xray's own connections route off-tun (Linux), and static hosts.
+	xray.SetTunMode(mark, hosts)
+
+	cfg, err := xray.BuildTunBridge(s.mainPort, name, mtu, s.loglevel())
+	if err != nil {
+		xray.SetTunMode(0, nil)
+		return fmt.Errorf("build bridge config: %w", err)
+	}
+	inst, err := Start(cfg)
+	if err != nil {
+		xray.SetTunMode(0, nil)
+		return fmt.Errorf("start bridge instance (Windows needs wintun.dll next to the exe): %w", err)
+	}
+
+	if err := s.tunMgr.Up(tun.Config{Name: name, Addr: addr, MTU: mtu, DNS: dns, Mark: mark, ServerIPs: ips}); err != nil {
+		_ = inst.Close()
+		xray.SetTunMode(0, nil)
+		return err
+	}
+
+	s.bridge = inst
+	s.tunOn = true
+	if mark != 0 {
+		s.logf("TUN up — all traffic via %s → exit; xray marked 0x%x to route off-tun", name, mark)
+	} else {
+		s.logf("TUN up — all traffic via %s → exit (%d server IP(s) bypassed)", name, len(ips))
+	}
+
+	// Rebuild the live instance so it's re-created WITH the decoration — its
+	// pre-TUN sockets aren't marked and would loop. The next cycle re-applies.
+	s.stopLive()
+	return nil
+}
+
+// tunDown restores the OS routing/DNS and stops the bridge instance. Idempotent.
+func (s *Supervisor) tunDown() {
+	if !s.tunOn && s.bridge == nil {
+		s.tunErr = false
+		return
+	}
+	xray.SetTunMode(0, nil) // stop decorating configs
+	_ = s.tunMgr.Down()
+	if s.bridge != nil {
+		_ = s.bridge.Close()
+		s.bridge = nil
+	}
+	s.tunOn = false
+	s.tunErr = false
+	s.logf("TUN down — routing and DNS restored")
+}
+
+// tunResolveAll resolves every configured main + node server host on the real
+// network (before the tunnel captures the default route). Returns the IPs to
+// keep off the tunnel (the Windows/macOS bypass list — Linux uses fwmark) and a
+// domain→IP map for the live config's static hosts (so an exit's own domain
+// resolves locally instead of looping through the tunnel it bootstraps).
+func (s *Supervisor) tunResolveAll() (ips []net.IP, hosts map[string]string) {
+	s.mu.Lock()
+	var srvHosts []string
+	for _, m := range s.st.Mains {
+		srvHosts = append(srvHosts, hostOf(m.URL))
+	}
+	for _, n := range s.st.ActiveNodes() {
+		srvHosts = append(srvHosts, n.Server)
+	}
+	s.mu.Unlock()
+
+	hosts = map[string]string{}
+	seen := map[string]bool{}
+	for _, h := range srvHosts {
+		if h == "" || seen[h] {
+			continue
+		}
+		seen[h] = true
+		if ip := net.ParseIP(h); ip != nil {
+			ips = append(ips, ip)
+			continue
+		}
+		addrs, err := net.LookupIP(h) // real network — tunnel isn't up yet
+		if err != nil {
+			s.logf("TUN: resolve %s: %v", h, err)
+			continue
+		}
+		for _, a := range addrs {
+			if a.To4() != nil {
+				ips = append(ips, a)
+				if hosts[h] == "" {
+					hosts[h] = a.String()
+				}
+			}
+		}
+	}
+	return ips, hosts
+}
+
+// hostOf extracts the host from a vless:// (or any) URL.
+func hostOf(u string) string {
+	p, err := url.Parse(u)
+	if err != nil {
+		return ""
+	}
+	return p.Hostname()
 }

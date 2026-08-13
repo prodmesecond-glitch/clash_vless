@@ -13,6 +13,7 @@ import (
 	// main/distro/all) to keep the binary small. If a config ever uses a
 	// protocol/transport not listed here, core.New will fail at runtime.
 	_ "github.com/xtls/xray-core/app/dispatcher"
+	_ "github.com/xtls/xray-core/app/dns" // static hosts for the exit's own domain in TUN mode
 	_ "github.com/xtls/xray-core/app/log"
 	_ "github.com/xtls/xray-core/app/proxyman/inbound"
 	_ "github.com/xtls/xray-core/app/proxyman/outbound"
@@ -20,7 +21,8 @@ import (
 
 	_ "github.com/xtls/xray-core/proxy/blackhole"      // "block" outbound
 	_ "github.com/xtls/xray-core/proxy/freedom"        // "direct" outbound
-	_ "github.com/xtls/xray-core/proxy/socks"          // local inbound
+	_ "github.com/xtls/xray-core/proxy/socks"          // local inbound + bridge's socks outbound
+	_ "github.com/xtls/xray-core/proxy/tun"            // TUN inbound (system-wide capture, bridge instance)
 	_ "github.com/xtls/xray-core/proxy/vless/outbound" // main + entry nodes
 
 	_ "github.com/xtls/xray-core/transport/internet/grpc"

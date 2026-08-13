@@ -25,6 +25,7 @@ import (
 	"clashvless/internal/happ"
 	"clashvless/internal/store"
 	"clashvless/internal/tui"
+	"clashvless/internal/tun"
 	"clashvless/internal/xray"
 )
 
@@ -118,6 +119,9 @@ func run(args []string) error {
 	case "loglevel", "log-level":
 		return cmdLoglevel(st, args[1:])
 
+	case "tun":
+		return cmdTun(st, args[1:])
+
 	case "list":
 		nodes := st.ActiveNodes()
 		if len(nodes) == 0 {
@@ -159,6 +163,7 @@ func run(args []string) error {
 		fmt.Println("  fetch            refetch all subscriptions")
 		fmt.Println("  fetch-proxy [addr|off]  fetch subs through a proxy: socks5://h:p, http://h:p, or h:p (socks5)")
 		fmt.Println("  loglevel [none|error|warning|info|debug]  xray log verbosity")
+		fmt.Println("  tun [on|off|status]   system-wide TUN capture (Linux/Windows; daemon must be root/admin)")
 		fmt.Println("  list             show active nodes (two pools)")
 		fmt.Println("  gen [entry]      print the xray config for main, optionally chained via a cached node")
 		fmt.Println("  up [entry]       start xray in-process (chained via [entry] also exposes hop-1 on its own port)")
@@ -289,7 +294,7 @@ func startEmbeddedDaemon(st *store.State) func() {
 	onLog := func(l string) { hub.Broadcast(control.Event{Type: "log", Line: l}) }
 	onStatus := func(s engine.Status) { hub.Broadcast(control.Event{Type: "status", Status: &s}) }
 	sup := engine.NewSupervisor(st, onStatus, onLog)
-	sup.SetQuiet(true) // xray must not write to the terminal — the TUI owns the screen
+	sup.SetQuiet(true)                    // xray must not write to the terminal — the TUI owns the screen
 	_ = os.Remove(st.ControlSocketPath()) // clear any stale socket (no live daemon — Dial failed)
 	go func() { _ = control.NewServer(sup, hub).Serve(ctx, st.ControlSocketPath()) }()
 	go func() { _ = sup.Run(ctx) }()
@@ -452,6 +457,61 @@ func cmdLoglevel(st *store.State, args []string) error {
 }
 
 // cmdFetchProxy shows or sets the SOCKS5 proxy used for subscription fetches.
+// cmdTun toggles system-wide TUN capture. With a running daemon it patches it
+// live (the supervisor brings the tunnel up/down next cycle); otherwise it saves
+// the flag for the next run. TUN needs the daemon running as root/Administrator.
+func cmdTun(st *store.State, args []string) error {
+	action := "status"
+	if len(args) > 0 {
+		action = strings.ToLower(strings.TrimSpace(args[0]))
+	}
+	switch action {
+	case "on", "enable", "1", "off", "disable", "0":
+		want := action == "on" || action == "enable" || action == "1"
+		if client, err := control.Dial(st.ControlSocketPath()); err == nil {
+			defer client.Close()
+			patch, _ := json.Marshal(map[string]any{"tun_enabled": want})
+			if err := client.SendPatch(patch); err != nil {
+				return err
+			}
+			_ = client.Send(control.Command{Cmd: "kick"})
+			fmt.Printf("TUN %s — sent to the running daemon\n", onOff(want))
+		} else {
+			st.TunEnabled = want
+			if err := st.Save(); err != nil {
+				return err
+			}
+			fmt.Printf("TUN %s — saved; applies when the daemon starts\n", onOff(want))
+		}
+		if want {
+			fmt.Println("  the daemon must run as root/Administrator (e.g. `sudo clashvless run`).")
+			if !tun.Supported() {
+				fmt.Println("  note: this OS build does not support TUN.")
+			}
+		}
+		return nil
+	case "status", "":
+		name := st.TunName
+		if name == "" {
+			name = tun.DefaultName()
+		}
+		fmt.Printf("TUN mode: %s\n", onOff(st.TunEnabled))
+		fmt.Printf("  os support: %v   this process privileged: %v\n", tun.Supported(), tun.Privileged())
+		fmt.Printf("  device %s   addr %s   mtu %d   dns %s\n",
+			name, st.TunAddress(), st.TunMTUOr(), st.TunResolver())
+		return nil
+	default:
+		return fmt.Errorf("usage: clashvless tun [on|off|status]")
+	}
+}
+
+func onOff(b bool) string {
+	if b {
+		return "ON"
+	}
+	return "OFF"
+}
+
 func cmdFetchProxy(st *store.State, args []string) error {
 	if len(args) == 0 {
 		if st.FetchProxy == "" {

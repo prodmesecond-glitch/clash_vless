@@ -1,8 +1,8 @@
 # clash_vless — project guide for Claude
 
 `clashvless` is a single-binary Go CLI/TUI that manages a **Happ-gated Remnawave
-subscription** and keeps a local SOCKS5 proxy pointed at the best working exit,
-with automatic tiered failover.
+subscription** and keeps the best working exit online — as a local SOCKS5 proxy
+or a **system-wide TUN** — with automatic tiered failover.
 
 ## Layout
 - `app/` — the Go module (`module clashvless`, Go 1.26). All source lives here.
@@ -16,12 +16,23 @@ with automatic tiered failover.
   - `internal/tui` — Bubble Tea dashboard client (Status / Subs / Main / Log / Config); `wizard.go`
     is the first-run setup wizard (sub → proxy → HWID → fetch → review → exit, with a non-plain warning).
     Mains & sub nodes show a proto tag (`store.ProtoTag`/`OutboundProtoTag`: plain·reality·vision·grpc·ws·tls·xhttp).
+    The Config tab has a **TUN mode** toggle.
+  - `internal/tun` — TUN mode OS layer (Linux `ip`/`resolvectl`, Windows `netsh`/`route`, macOS
+    `route`/`networksetup`; stub on other OSes). Moves the default route onto the device and keeps **xray's
+    own sockets off the tunnel** so the live exit AND the failover probes reach servers directly — on Linux
+    via **fwmark policy routing** (`tun.FwMark`, a private table for marked traffic), on Windows/macOS via
+    per-server bypass routes. Sets exit-routed DNS; `Down()` restores everything. Needs root/admin. Device
+    name default is OS-specific (`tun.DefaultName()`: `clashvless0` on Linux/Windows, `utunN` on macOS —
+    xray requires that form and assigns the utun's address itself). Forwards TCP/UDP only — **ICMP/`ping`
+    does not traverse the tunnel**; test with `curl`, not `ping`.
   - `cmd/xhserver` — local test rig: Vision-reality hop (`:9001`) + xhttp-reality exit (`:9002`) +
     plain-reality (non-Vision) hop (`:9003`), to point a client config at (direct T1 / hopped T2).
     Separate `main` (pulls in vless/inbound); not in the app binary.
   - `cmd/xhprobe` — self-contained chaining-mechanism probe: stands up exit+hops and dials them
     via every method (`proxySettings` vs `sockopt.dialerProxy`, xhttp/tcp × Vision/non-Vision),
     printing PASS/FAIL. Proves why chaining uses dialerProxy; re-run after any xray-core bump.
+  - `cmd/tunprobe` — root/admin-only lab: starts JUST the TUN bridge, confirms xray creates the device,
+    then tears down **without touching routing** (safe). Answers "does the native tun inbound work here?".
 - `app/vendor/` — vendored deps (committed; builds are hermetic/offline).
 - `dist/` — prebuilt release binaries (**not committed**; build artifacts).
 
@@ -35,7 +46,8 @@ go -C app build ./...                        # compile-check every package
 an in-process daemon** if none is running (stops when the TUI exits), so a fresh install needs no shell:
 `clashvless tui` → the setup wizard opens on the empty config. `run` no longer requires a main (idles DOWN).
 Key commands: `add <url>`, `fetch`, `fetch-proxy [host:port|off]`, `loglevel [level]`, `main add <vless://>`,
-`up [entry]`, `run`, `whoami`. See the default-case help block in `main.go` for the full list.
+`up [entry]`, `run`, `tun [on|off|status]`, `whoami`. See the default-case help block in `main.go`.
+For **TUN mode** the daemon must be elevated: `sudo clashvless run` (then attach the TUI as a client).
 
 ## Architecture essentials
 - **Topology**: local SOCKS inbound → `main` outbound (the final exit, always).
@@ -55,6 +67,21 @@ Key commands: `add <url>`, `fetch`, `fetch-proxy [host:port|off]`, `loglevel [le
   a quick "is any hop working?" test that keeps the hop-1 port served. `PinTier`/`PinEntry` still override.
 - **Chaining trick** (`xray.BuildConfig`): a chained `main` dials through the entry via outbound
   `proxySettings.tag`, and its XTLS flow is stripped — a hopped main must be `flow=""` (non-Vision).
+- **TUN mode** (`store.TunEnabled`, `internal/tun`, `engine.syncTun`/`tunUp`/`tunDown`): opt-in
+  system-wide capture. A separate **persistent bridge** instance (`xray.BuildTunBridge`: `tun` inbound →
+  `socks` outbound → local `ListenPort`) owns the device, so the exit swaps behind the stable SOCKS port
+  **without churning routes**, and `apply()`/probe paths stay untouched. The OS layer moves the default
+  route onto the tun (`0/1`+`128/1` halves) and keeps **xray's own connections off the tunnel** — vital,
+  since the failover probes must egress-test candidate exits over a non-tun path or every "ping" fails.
+  On Linux that's **fwmark policy routing**: `xray.SetTunMode(mark,hosts)` makes `BuildConfig` stamp
+  `sockopt.mark` on every dial (live + probes), and a rule sends marked traffic to a private table out the
+  real uplink — so the main table stays clean (no per-server `/32`s) and probes work. Windows/macOS lack
+  fwmark, so they bypass by explicit per-server routes instead. DNS points at `TunDNS` (rides the tunnel);
+  the exit's own domain resolves locally via injected `dns.hosts` (also from `SetTunMode`, needs `app/dns`)
+  so bootstrap doesn't loop. IPv4 only (IPv6 isn't tunneled → disable it if leaks matter). Needs root/admin.
+  Linux is
+  the tested path; **Windows and macOS are code-complete but author-untested** (Windows also needs
+  `wintun.dll` beside the exe; macOS uses a kernel-named `utunN` device and per-service DNS).
 - **What can be hopped** (see README matrix + `cmd/xhprobe` lab): a **plain** main (`security=none`,
   e.g. `plain-444`) hops through **any** entry. A main with **its own REALITY** (xhttp / tcp-reality)
   can only hop through a **non-Vision** entry — a Vision entry splices/pads the stream and mangles the
@@ -69,6 +96,7 @@ Key commands: `add <url>`, `fetch`, `fetch-proxy [host:port|off]`, `loglevel [le
 ## Conventions
 - `engine/runner.go` registers only the xray features actually used (keeps the binary small).
   A config using an unregistered protocol/transport fails at runtime — add the blank import there.
+  (TUN mode added `proxy/tun` + `app/dns`; `proxy/socks` also provides the bridge's socks *outbound*.)
 - Redact secrets (`id` / `publicKey` / `shortId` / `password`) when printing configs — see
   `redactSecrets` in `main.go`.
 - Keep code comments minimal: only a line for a constraint the code itself can't show.

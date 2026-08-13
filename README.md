@@ -86,11 +86,48 @@ clashvless main add '<vless://…>'         # add a final exit (plain hops freel
 | `up [entry]` | serve one tier once (optionally chained via a node) |
 | `gen [entry]` | print the assembled xray config for a tier |
 | `run` | headless failover engine |
+| `tun [on\|off\|status]` | system-wide TUN capture (needs a root/admin daemon — see below) |
 | `tui` | the dashboard (default with no args) |
 | `whoami` | show this device's panel identity |
 
 Flags: `--config <path>` (alternate state file/dir — e.g. keep real and demo profiles) ·
 `--cli` (headless) · `--debug` (mirror engine events to `events.log`).
+
+## TUN mode (system-wide)
+
+By default clashvless serves a **SOCKS5 proxy** you point apps at. TUN mode instead captures **all**
+traffic on the machine and routes it through the active exit — no per-app proxy config. It needs the
+daemon running **elevated** (creating a network device requires root/Administrator), so run it standalone:
+
+```sh
+sudo clashvless run        # daemon as root — TUN can create the device
+clashvless tun on          # turn TUN on  (or toggle it in the TUI Config tab)
+clashvless tui             # attach the dashboard as your normal user
+clashvless tun off         # back to SOCKS-only
+```
+
+**How it works.** A small persistent *bridge* (xray's native `tun` inbound → the local SOCKS port) owns
+the device, so failover swaps the exit behind the stable SOCKS port **without dropping the tunnel** or
+touching routes. The default route is moved onto the TUN; the proxy **server IPs are auto-bypassed**
+(routed direct via your real gateway) so the exit connection doesn't loop back into the tunnel; and DNS is
+pointed at a resolver whose queries ride the tunnel (no leaks to your ISP's resolver). The exit's own
+domain resolves locally, so bootstrap never chicken-and-eggs.
+
+**Notes / limits**
+- **`ping` doesn't traverse the tunnel** — xray's TUN forwards **TCP and UDP only, not ICMP**. So
+  `ping 8.8.8.8` shows 100% loss even when everything works; test with `curl ifconfig.me` (it should print
+  your *exit's* IP) or just browse. This is normal for xray-tun / tun2socks, not a bug.
+- xray's own connections — the live exit **and the failover probes** — are kept off the tunnel so egress
+  testing keeps working: on **Linux** via `fwmark` policy routing (the main route table stays clean — no
+  per-server routes), on **Windows/macOS** via explicit per-server bypass routes.
+- **Linux, Windows, and macOS.** Linux is the tested path; **Windows and macOS are code-complete but not
+  yet runtime-tested — treat them as beta.**
+- **Windows** needs `wintun.dll` next to the executable (from [wintun.net](https://www.wintun.net/)).
+- **macOS** uses a kernel-named `utunN` device (xray requires the `utunN` form); the default is `utun9` —
+  set `tun_name` to another `utunN` if that unit is busy.
+- **IPv4 only** — IPv6 is not tunneled; disable IPv6 if leaks matter.
+- Sanity-check the device layer on your box *without* touching routing: `sudo go -C app run ./cmd/tunprobe`.
+- Tunables (state file / Config tab): `tun_name`, `tun_addr`, `tun_mtu`, `tun_dns`.
 
 ## How failover works
 

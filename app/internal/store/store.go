@@ -66,19 +66,29 @@ type State struct {
 	Mains  []Main `json:"mains"` // final-exit candidates: direct (w/o-hop → T1) and/or hopped (T2/T3)
 
 	// engine tuning — editable in the TUI config tab (0 = built-in default).
-	ListenPort    int `json:"listen_port"`
+	ListenPort    int    `json:"listen_port"`
 	EntryPort     int    `json:"entry_port"`  // first-hop local port while chained (0 = auto: ListenPort+1)
 	ListenAddr    string `json:"listen_addr"` // bind address for local inbound(s); "" = 0.0.0.0 (LAN-reachable)
-	Interval      int `json:"interval_s"`
-	Timeout       int `json:"timeout_s"`
+	Interval      int    `json:"interval_s"`
+	Timeout       int    `json:"timeout_s"`
 	UpThreshold   int    `json:"up_threshold"`
 	DownThreshold int    `json:"down_threshold"`
 	PinTier       int    `json:"pin_tier"`
-	PinEntry      string `json:"pin_entry"` // pinned entry node name ("" = auto-select)
-	ForceHop      bool   `json:"force_hop"` // skip T1 direct — always route through a hop (T2/T3)
+	PinEntry      string `json:"pin_entry"`       // pinned entry node name ("" = auto-select)
+	ForceHop      bool   `json:"force_hop"`       // skip T1 direct — always route through a hop (T2/T3)
 	FetchProxy    string `json:"fetch_proxy"`     // proxy for subscription fetches (socks5://, http://, or bare host:port=socks5)
 	UseFetchProxy bool   `json:"use_fetch_proxy"` // route fetches through FetchProxy
 	LogLevel      string `json:"log_level"`       // xray verbosity: none|error|warning|info|debug ("" = warning)
+
+	// TUN mode (system-wide capture; Linux + Windows). A separate persistent
+	// "bridge" xray instance (tun inbound → local SOCKS) owns the device, so
+	// failover swaps the exit behind the SOCKS port without churning the TUN.
+	// Requires root (Linux) / admin (Windows). See internal/tun.
+	TunEnabled bool   `json:"tun_enabled"`
+	TunName    string `json:"tun_name"` // device name ("" = clashvless0)
+	TunAddr    string `json:"tun_addr"` // interface CIDR ("" = 198.18.0.1/30)
+	TunMTU     int    `json:"tun_mtu"`  // 0 = 1500
+	TunDNS     string `json:"tun_dns"`  // resolver set on the TUN, routed through the exit ("" = 8.8.8.8)
 
 	// legacy fields, migrated into Subs / Mains on load.
 	LegacyURL       string    `json:"subscription_url,omitempty"`
@@ -94,7 +104,7 @@ type State struct {
 const DefaultUA = "Happ/3.13.0"
 
 // Version is the app version, shown in the TUI header and `version` command.
-const Version = "0.10.0"
+const Version = "0.11.0"
 
 func Dir() (string, error) {
 	base, err := os.UserConfigDir()
@@ -248,6 +258,33 @@ func (s *State) FetchProxyAddr() string {
 		return s.FetchProxy
 	}
 	return ""
+}
+
+// TunAddress is the CIDR assigned to the TUN interface (config or default). The
+// gVisor stack is promiscuous, so the exact address is cosmetic — it only needs
+// to be a small private subnet the routes can attach to.
+func (s *State) TunAddress() string {
+	if s.TunAddr != "" {
+		return s.TunAddr
+	}
+	return "198.18.0.1/30"
+}
+
+// TunMTUOr is the TUN MTU (config or 1500).
+func (s *State) TunMTUOr() int {
+	if s.TunMTU > 0 {
+		return s.TunMTU
+	}
+	return 1500
+}
+
+// TunResolver is the DNS server set on the TUN (queries ride the tunnel to the
+// exit). Config or a sensible default.
+func (s *State) TunResolver() string {
+	if s.TunDNS != "" {
+		return s.TunDNS
+	}
+	return "8.8.8.8"
 }
 
 // EntryListenPort is the local SOCKS port the current first hop (entry node) is

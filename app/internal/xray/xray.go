@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // VlessToOutbound converts a vless:// share link into an xray outbound object
@@ -162,6 +163,108 @@ func BuildConfig(port int, main, entry json.RawMessage, entryPort int, logLevel,
 		"inbounds":  inbounds,
 		"outbounds": outbounds,
 		"routing":   map[string]any{"rules": rules},
+	}
+	applyTunMode(cfg) // TUN mode: SO_MARK every dial + static hosts (no-op otherwise)
+	return json.MarshalIndent(cfg, "", "  ")
+}
+
+// --- TUN-mode config decoration --------------------------------------------
+//
+// When TUN mode is active, BuildConfig marks every dialing outbound's socket
+// with SO_MARK so Linux policy routing can steer xray's OWN connections AROUND
+// the tunnel — the live exit and, crucially, the failover probes, which must
+// reach candidate exits over a non-TUN path or every failover "ping" fails. It
+// also injects static hosts so an exit's own domain resolves locally instead of
+// looping through the tunnel it bootstraps.
+
+var (
+	tunMu    sync.RWMutex
+	tunMark  int32
+	tunHosts map[string]string
+)
+
+// SetTunMode configures the decoration BuildConfig applies to every config it
+// produces (live and probe alike). mark=0 & hosts=nil disables it. The
+// supervisor sets it when TUN comes up and clears it when TUN goes down.
+func SetTunMode(mark int32, hosts map[string]string) {
+	tunMu.Lock()
+	tunMark, tunHosts = mark, hosts
+	tunMu.Unlock()
+}
+
+func applyTunMode(cfg map[string]any) {
+	tunMu.RLock()
+	mark, hosts := tunMark, tunHosts
+	tunMu.RUnlock()
+	if mark == 0 && len(hosts) == 0 {
+		return
+	}
+	if len(hosts) > 0 {
+		h := map[string]any{}
+		for host, ip := range hosts {
+			h[host] = ip
+		}
+		cfg["dns"] = map[string]any{"hosts": h}
+	}
+	if mark == 0 { // no SO_MARK (non-Linux): bypass is done by explicit routes
+		return
+	}
+	obs, _ := cfg["outbounds"].([]any)
+	for _, o := range obs {
+		ob, ok := o.(map[string]any)
+		if !ok || ob["protocol"] == "blackhole" { // "block" never dials
+			continue
+		}
+		ss, _ := ob["streamSettings"].(map[string]any)
+		if ss == nil {
+			ss = map[string]any{}
+			ob["streamSettings"] = ss
+		}
+		so, _ := ss["sockopt"].(map[string]any)
+		if so == nil {
+			so = map[string]any{}
+			ss["sockopt"] = so
+		}
+		so["mark"] = mark
+	}
+}
+
+// BuildTunBridge assembles the config for the persistent TUN "bridge" instance:
+// a `tun` inbound whose traffic is forwarded to the local SOCKS port (socksPort)
+// that the failover instance serves. Isolating the TUN in its own instance lets
+// the exit be swapped behind the SOCKS port without recreating the TUN device,
+// so failover never churns system routes. The OS-level interface/route/DNS setup
+// is done separately by internal/tun.
+func BuildTunBridge(socksPort int, tunName string, mtu int, logLevel string) (json.RawMessage, error) {
+	if mtu <= 0 {
+		mtu = 1500
+	}
+	if tunName == "" {
+		tunName = "clashvless0"
+	}
+	ll := logLevel
+	if ll == "" {
+		ll = "warning"
+	}
+	cfg := map[string]any{
+		"log": map[string]any{"loglevel": ll},
+		"inbounds": []any{map[string]any{
+			"tag":      "tun-in",
+			"protocol": "tun",
+			"settings": map[string]any{"name": tunName, "MTU": mtu},
+			"sniffing": map[string]any{"enabled": true, "destOverride": []any{"http", "tls", "quic"}},
+		}},
+		"outbounds": []any{map[string]any{
+			"tag":      "to-socks",
+			"protocol": "socks",
+			"settings": map[string]any{"servers": []any{map[string]any{
+				"address": "127.0.0.1",
+				"port":    socksPort,
+			}}},
+		}},
+		"routing": map[string]any{"rules": []any{
+			map[string]any{"type": "field", "inboundTag": []any{"tun-in"}, "outboundTag": "to-socks"},
+		}},
 	}
 	return json.MarshalIndent(cfg, "", "  ")
 }
