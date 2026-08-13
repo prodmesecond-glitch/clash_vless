@@ -10,11 +10,10 @@ import (
 	"time"
 )
 
-// Supported reports that TUN mode is implemented on macOS.
+// Supported reports that TUN mode is implemented on macOS (tested + working).
 //
-// NOTE: the macOS backend is code-complete but has not been runtime-tested by
-// the author. xray creates the utun device and assigns it a link-local
-// point-to-point address itself; this backend only adds routes and DNS.
+// xray creates the utun device and assigns it a link-local point-to-point
+// address itself; this backend only adds routes and DNS.
 func Supported() bool { return true }
 
 // Privileged reports whether we can create/configure a utun (needs root).

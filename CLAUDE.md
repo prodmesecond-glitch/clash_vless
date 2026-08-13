@@ -79,9 +79,9 @@ For **TUN mode** the daemon must be elevated: `sudo clashvless run` (then attach
   fwmark, so they bypass by explicit per-server routes instead. DNS points at `TunDNS` (rides the tunnel);
   the exit's own domain resolves locally via injected `dns.hosts` (also from `SetTunMode`, needs `app/dns`)
   so bootstrap doesn't loop. IPv4 only (IPv6 isn't tunneled → disable it if leaks matter). Needs root/admin.
-  Linux is
-  the tested path; **Windows and macOS are code-complete but author-untested** (Windows also needs
-  `wintun.dll` beside the exe; macOS uses a kernel-named `utunN` device and per-service DNS).
+  Linux and macOS
+  are tested and working; **Windows is code-complete but author-untested** (needs `wintun.dll` beside the
+  exe). macOS uses a kernel-named `utunN` device and per-service DNS.
 - **What can be hopped** (see README matrix + `cmd/xhprobe` lab): a **plain** main (`security=none`,
   e.g. `plain-444`) hops through **any** entry. A main with **its own REALITY** (xhttp / tcp-reality)
   can only hop through a **non-Vision** entry — a Vision entry splices/pads the stream and mangles the

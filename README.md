@@ -120,8 +120,8 @@ domain resolves locally, so bootstrap never chicken-and-eggs.
 - xray's own connections — the live exit **and the failover probes** — are kept off the tunnel so egress
   testing keeps working: on **Linux** via `fwmark` policy routing (the main route table stays clean — no
   per-server routes), on **Windows/macOS** via explicit per-server bypass routes.
-- **Linux, Windows, and macOS.** Linux is the tested path; **Windows and macOS are code-complete but not
-  yet runtime-tested — treat them as beta.**
+- **Linux, Windows, and macOS.** Linux and macOS are tested and working; **Windows is code-complete but
+  not yet runtime-tested — treat it as beta.**
 - **Windows** needs `wintun.dll` next to the executable (from [wintun.net](https://www.wintun.net/)).
 - **macOS** uses a kernel-named `utunN` device (xray requires the `utunN` form); the default is `utun9` —
   set `tun_name` to another `utunN` if that unit is busy.
