@@ -87,6 +87,7 @@ clashvless main add '<vless://…>'         # add a final exit (plain hops freel
 | `gen [entry]` | print the assembled xray config for a tier |
 | `run` | headless failover engine |
 | `tun [on\|off\|status]` | system-wide TUN capture (needs a root/admin daemon — see below) |
+| `tun dns <ip>` · `tun dns direct\|tunnel` | set the TUN resolver · route DNS off-tun or through the exit |
 | `tui` | the dashboard (default with no args) |
 | `whoami` | show this device's panel identity |
 
@@ -112,6 +113,12 @@ touching routes. The default route is moved onto the TUN; the proxy **server IPs
 (routed direct via your real gateway) so the exit connection doesn't loop back into the tunnel; and DNS is
 pointed at a resolver whose queries ride the tunnel (no leaks to your ISP's resolver). The exit's own
 domain resolves locally, so bootstrap never chicken-and-eggs.
+
+If your exit/nodes are **domain-named** and TUN comes up stuck on `all tiers unreachable`, it's the DNS
+bootstrap deadlock — resolving those names goes through a tunnel that isn't up yet. Flip DNS to resolve on
+the real network instead: `clashvless tun dns direct` (or the **TUN DNS direct** toggle in the Config tab),
+and point it at a resolver that answers there with `clashvless tun dns <ip>`. This trades DNS privacy for
+getting the tunnel to bootstrap.
 
 **Notes / limits**
 - **`ping` doesn't traverse the tunnel** — xray's TUN forwards **TCP and UDP only, not ICMP**. So

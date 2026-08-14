@@ -780,12 +780,21 @@ func (s *Supervisor) tunUp() error {
 	mtu := s.cfgInt(func(st *store.State) int { return st.TunMTUOr() })
 	addr := s.cfgStr(func(st *store.State) string { return st.TunAddress() })
 	dns := s.cfgStr(func(st *store.State) string { return st.TunResolver() })
+	dnsDirect := s.cfgBool(func(st *store.State) bool { return st.TunDNSDirect })
 
 	// Resolve every server host on the real network (before the tunnel captures
 	// the default route): the IPs for the Windows/macOS bypass list, and a
 	// domain→IP map for static hosts (so an exit's own domain resolves locally).
 	ips, hosts := s.tunResolveAll()
 	mark := tun.FwMark()
+
+	// DNS-direct: reach the resolver off-tun. Linux pins a /32 (see osUp); on
+	// Windows/macOS fold the resolver IP into the per-server bypass list.
+	if dnsDirect {
+		if ip := net.ParseIP(dns); ip != nil {
+			ips = append(ips, ip)
+		}
+	}
 
 	// From now on BuildConfig decorates every config (live + probes): SO_MARK so
 	// xray's own connections route off-tun (Linux), and static hosts.
@@ -802,7 +811,7 @@ func (s *Supervisor) tunUp() error {
 		return fmt.Errorf("start bridge instance (Windows needs wintun.dll next to the exe): %w", err)
 	}
 
-	if err := s.tunMgr.Up(tun.Config{Name: name, Addr: addr, MTU: mtu, DNS: dns, Mark: mark, ServerIPs: ips}); err != nil {
+	if err := s.tunMgr.Up(tun.Config{Name: name, Addr: addr, MTU: mtu, DNS: dns, DNSDirect: dnsDirect, Mark: mark, ServerIPs: ips}); err != nil {
 		_ = inst.Close()
 		xray.SetTunMode(0, nil)
 		return err

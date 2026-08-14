@@ -22,7 +22,8 @@ type Config struct {
 	Name      string   // device name (created by xray's tun inbound)
 	Addr      string   // interface address CIDR, e.g. "198.18.0.1/30"
 	MTU       int      // informational on most OSes (xray sets it)
-	DNS       string   // resolver to set system-wide (its queries ride the tunnel)
+	DNS       string   // resolver to set system-wide
+	DNSDirect bool     // reach DNS off-tun (bypass route) instead of through the tunnel
 	Mark      int32    // SO_MARK xray stamps on its sockets; Linux steers marked traffic off-tun (0 = none)
 	ServerIPs []net.IP // Windows/macOS: server IPs to route direct (Linux uses Mark instead)
 }

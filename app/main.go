@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/signal"
 	"regexp"
@@ -164,6 +165,7 @@ func run(args []string) error {
 		fmt.Println("  fetch-proxy [addr|off]  fetch subs through a proxy: socks5://h:p, http://h:p, or h:p (socks5)")
 		fmt.Println("  loglevel [none|error|warning|info|debug]  xray log verbosity")
 		fmt.Println("  tun [on|off|status]   system-wide TUN capture (Linux/Windows; daemon must be root/admin)")
+		fmt.Println("  tun dns <ip>|direct|tunnel   set the TUN resolver / route it off-tun or through the exit")
 		fmt.Println("  list             show active nodes (two pools)")
 		fmt.Println("  gen [entry]      print the xray config for main, optionally chained via a cached node")
 		fmt.Println("  up [entry]       start xray in-process (chained via [entry] also exposes hop-1 on its own port)")
@@ -465,6 +467,25 @@ func cmdTun(st *store.State, args []string) error {
 	if len(args) > 0 {
 		action = strings.ToLower(strings.TrimSpace(args[0]))
 	}
+	// apply a config patch to the running daemon if one is up, else persist to disk.
+	apply := func(patch map[string]any, set func(*store.State)) error {
+		if client, err := control.Dial(st.ControlSocketPath()); err == nil {
+			defer client.Close()
+			b, _ := json.Marshal(patch)
+			if err := client.SendPatch(b); err != nil {
+				return err
+			}
+			_ = client.Send(control.Command{Cmd: "kick"})
+			fmt.Println("  applied to the running daemon (toggle TUN off/on for it to take effect)")
+			return nil
+		}
+		set(st)
+		if err := st.Save(); err != nil {
+			return err
+		}
+		fmt.Println("  saved; applies when the daemon starts")
+		return nil
+	}
 	switch action {
 	case "on", "enable", "1", "off", "disable", "0":
 		want := action == "on" || action == "enable" || action == "1"
@@ -490,6 +511,28 @@ func cmdTun(st *store.State, args []string) error {
 			}
 		}
 		return nil
+	case "dns":
+		// tun dns <ip>            — set the resolver
+		// tun dns direct|tunnel   — route it off-tun (breaks the bootstrap deadlock) or through the exit
+		if len(args) < 2 {
+			fmt.Printf("TUN DNS: %s  (%s)\n", st.TunResolver(), tunDNSModeLabel(st.TunDNSDirect))
+			fmt.Println("usage: clashvless tun dns <ip>  |  tun dns direct|tunnel")
+			return nil
+		}
+		switch v := strings.ToLower(strings.TrimSpace(args[1])); v {
+		case "direct", "off-tun":
+			fmt.Println("TUN DNS → DIRECT (resolves off-tun on the real network — breaks the domain-node deadlock)")
+			return apply(map[string]any{"tun_dns_direct": true}, func(s *store.State) { s.TunDNSDirect = true })
+		case "tunnel", "through", "via-tunnel":
+			fmt.Println("TUN DNS → THROUGH TUNNEL (default; no DNS leak, needs the exit up)")
+			return apply(map[string]any{"tun_dns_direct": false}, func(s *store.State) { s.TunDNSDirect = false })
+		default:
+			if net.ParseIP(v) == nil {
+				return fmt.Errorf("not an IP: %q — use `tun dns <ip>` or `tun dns direct|tunnel`", args[1])
+			}
+			fmt.Printf("TUN DNS resolver → %s\n", v)
+			return apply(map[string]any{"tun_dns": v}, func(s *store.State) { s.TunDNS = v })
+		}
 	case "status", "":
 		name := st.TunName
 		if name == "" {
@@ -497,12 +540,20 @@ func cmdTun(st *store.State, args []string) error {
 		}
 		fmt.Printf("TUN mode: %s\n", onOff(st.TunEnabled))
 		fmt.Printf("  os support: %v   this process privileged: %v\n", tun.Supported(), tun.Privileged())
-		fmt.Printf("  device %s   addr %s   mtu %d   dns %s\n",
-			name, st.TunAddress(), st.TunMTUOr(), st.TunResolver())
+		fmt.Printf("  device %s   addr %s   mtu %d\n", name, st.TunAddress(), st.TunMTUOr())
+		fmt.Printf("  dns %s  (%s)\n", st.TunResolver(), tunDNSModeLabel(st.TunDNSDirect))
 		return nil
 	default:
-		return fmt.Errorf("usage: clashvless tun [on|off|status]")
+		return fmt.Errorf("usage: clashvless tun [on|off|status|dns <ip>|dns direct|dns tunnel]")
 	}
+}
+
+// tunDNSModeLabel describes how TUN DNS is routed.
+func tunDNSModeLabel(direct bool) string {
+	if direct {
+		return "direct / off-tun"
+	}
+	return "through tunnel"
 }
 
 func onOff(b bool) string {

@@ -91,6 +91,13 @@ func (m *Manager) osUp(cfg Config) error {
 	}
 
 	if cfg.DNS != "" {
+		if cfg.DNSDirect {
+			// Pin the resolver off the tunnel (its own /32 out the real uplink) so
+			// DNS answers during bootstrap instead of looping into a not-yet-up
+			// exit — breaks the domain-named-node deadlock. Trades DNS privacy.
+			m.runSoft("ip", "route", "add", cfg.DNS+"/32", "via", gw, "dev", dev)
+			m.logf("tun: DNS %s → DIRECT (off-tun via %s) — resolves on the real network", cfg.DNS, dev)
+		}
 		m.setDNS(cfg.DNS)
 	}
 	m.logf("tun: up — default routed through %s (IPv6 is not tunneled; disable it if leaks matter)", cfg.Name)
@@ -104,6 +111,9 @@ func (m *Manager) osDown() error {
 	mark := strconv.Itoa(int(m.cfg.Mark))
 	m.runSoft("ip", "rule", "del", "fwmark", mark, "table", fwTable)
 	m.runSoft("ip", "route", "flush", "table", fwTable)
+	if m.cfg.DNSDirect && m.cfg.DNS != "" {
+		m.runSoft("ip", "route", "del", m.cfg.DNS+"/32", "via", m.origGW, "dev", m.origDev)
+	}
 	m.restoreDNS()
 	m.logf("tun: down — routing and DNS restored")
 	return nil

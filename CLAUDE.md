@@ -46,7 +46,8 @@ go -C app build ./...                        # compile-check every package
 an in-process daemon** if none is running (stops when the TUI exits), so a fresh install needs no shell:
 `clashvless tui` → the setup wizard opens on the empty config. `run` no longer requires a main (idles DOWN).
 Key commands: `add <url>`, `fetch`, `fetch-proxy [host:port|off]`, `loglevel [level]`, `main add <vless://>`,
-`up [entry]`, `run`, `tun [on|off|status]`, `whoami`. See the default-case help block in `main.go`.
+`up [entry]`, `run`, `tun [on|off|status|dns <ip>|dns direct|dns tunnel]`, `whoami`. See the default-case
+help block in `main.go`.
 For **TUN mode** the daemon must be elevated: `sudo clashvless run` (then attach the TUI as a client).
 
 ## Architecture essentials
@@ -78,7 +79,12 @@ For **TUN mode** the daemon must be elevated: `sudo clashvless run` (then attach
   real uplink — so the main table stays clean (no per-server `/32`s) and probes work. Windows/macOS lack
   fwmark, so they bypass by explicit per-server routes instead. DNS points at `TunDNS` (rides the tunnel);
   the exit's own domain resolves locally via injected `dns.hosts` (also from `SetTunMode`, needs `app/dns`)
-  so bootstrap doesn't loop. IPv4 only (IPv6 isn't tunneled → disable it if leaks matter). Needs root/admin.
+  so bootstrap doesn't loop. **`TunDNSDirect`** (`tun dns direct|tunnel`, Config-tab toggle) pins `TunDNS`
+  **off-tun** instead (a `/32` bypass via the real uplink on Linux; folded into the per-server bypass on
+  Win/mac) — so **domain-named nodes/exits resolve immediately** rather than through a not-yet-up tunnel
+  (the bootstrap deadlock); trades DNS privacy, so point `TunDNS` at a resolver that answers on the real
+  network. `tun dns <ip>` sets the resolver. IPv4 only (IPv6 isn't tunneled → disable it if leaks matter).
+  Needs root/admin.
   Linux and macOS
   are tested and working; **Windows is code-complete but author-untested** (needs `wintun.dll` beside the
   exe). macOS uses a kernel-named `utunN` device and per-service DNS.

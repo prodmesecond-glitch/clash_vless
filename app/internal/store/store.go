@@ -88,7 +88,13 @@ type State struct {
 	TunName    string `json:"tun_name"` // device name ("" = clashvless0)
 	TunAddr    string `json:"tun_addr"` // interface CIDR ("" = 198.18.0.1/30)
 	TunMTU     int    `json:"tun_mtu"`  // 0 = 1500
-	TunDNS     string `json:"tun_dns"`  // resolver set on the TUN, routed through the exit ("" = 8.8.8.8)
+	TunDNS     string `json:"tun_dns"`  // resolver set on the TUN ("" = 8.8.8.8)
+	// TunDNSDirect: reach TunDNS OFF the tunnel (a /32 bypass out the real uplink)
+	// instead of routing DNS through the exit. Trades DNS privacy for breaking the
+	// bootstrap deadlock — domain-named nodes/exits resolve immediately instead of
+	// through a not-yet-up tunnel. Set TunDNS to a resolver that answers on the
+	// real network. false (default) = route DNS through the tunnel (no leak).
+	TunDNSDirect bool `json:"tun_dns_direct"`
 
 	// legacy fields, migrated into Subs / Mains on load.
 	LegacyURL       string    `json:"subscription_url,omitempty"`
@@ -104,7 +110,7 @@ type State struct {
 const DefaultUA = "Happ/3.13.0"
 
 // Version is the app version, shown in the TUI header and `version` command.
-const Version = "0.11.2"
+const Version = "0.12.0"
 
 func Dir() (string, error) {
 	base, err := os.UserConfigDir()

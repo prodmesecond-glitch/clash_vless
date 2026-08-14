@@ -457,6 +457,7 @@ var cfgFields = []cfgField{
 	{"Pin tier", func(st *store.State) int { return st.PinTier }, func(st *store.State, v int) { st.PinTier = v }, 0, 3, pinLabel, "0 = auto cascade"},
 	{"Force hop (skip T1)", func(st *store.State) int { return b2i(st.ForceHop) }, func(st *store.State, v int) { st.ForceHop = v != 0 }, 0, 1, onOff, "always route through a hop — hop test"},
 	{"TUN mode (all traffic)", func(st *store.State) int { return b2i(st.TunEnabled) }, func(st *store.State, v int) { st.TunEnabled = v != 0 }, 0, 1, onOff, "system-wide capture; daemon must be root/admin"},
+	{"TUN DNS direct (off-tun)", func(st *store.State) int { return b2i(st.TunDNSDirect) }, func(st *store.State, v int) { st.TunDNSDirect = v != 0 }, 0, 1, onOff, "resolve DNS on the real net — breaks the domain-node bootstrap deadlock (set tun_dns to a reachable resolver)"},
 	{"Listen port", func(st *store.State) int { return st.ListenPort }, func(st *store.State, v int) { st.ListenPort = v }, 1024, 65535, nil, "restart to apply"},
 	{"Allow LAN (0.0.0.0)", func(st *store.State) int {
 		if st.ListenHost() == "127.0.0.1" {
