@@ -125,7 +125,9 @@ getting the tunnel to bootstrap.
   `ping 8.8.8.8` shows 100% loss even when everything works; test with `curl ifconfig.me` (it should print
   your *exit's* IP) or just browse. This is normal for xray-tun / tun2socks, not a bug.
 - xray's own connections — the live exit **and the failover probes** — are kept off the tunnel so egress
-  testing keeps working: on **Linux** via `fwmark` policy routing (the main route table stays clean — no
+  testing keeps working: on **Linux** via `fwmark` policy routing **plus `SO_BINDTODEVICE`** onto the real
+  uplink (the device bind survives firewalls — e.g. Docker/firewalld — that strip the packet mark, which
+  would otherwise loop xray's own traffic back into the tun; the main route table stays clean — no
   per-server routes), on **Windows/macOS** via explicit per-server bypass routes.
 - **Linux, Windows, and macOS.** Linux and macOS are tested and working; **Windows is code-complete but
   not yet runtime-tested — treat it as beta.**

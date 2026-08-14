@@ -787,6 +787,7 @@ func (s *Supervisor) tunUp() error {
 	// domain→IP map for static hosts (so an exit's own domain resolves locally).
 	ips, hosts := s.tunResolveAll()
 	mark := tun.FwMark()
+	dev := tun.UplinkDevice()
 
 	// DNS-direct: reach the resolver off-tun. Linux pins a /32 (see osUp); on
 	// Windows/macOS fold the resolver IP into the per-server bypass list.
@@ -796,31 +797,38 @@ func (s *Supervisor) tunUp() error {
 		}
 	}
 
-	// From now on BuildConfig decorates every config (live + probes): SO_MARK so
-	// xray's own connections route off-tun (Linux), and static hosts.
-	xray.SetTunMode(mark, hosts)
+	// From now on BuildConfig decorates every config (live + probes): SO_MARK +
+	// SO_BINDTODEVICE onto the real uplink so xray's own connections stay off-tun
+	// (Linux), plus static hosts. The device bind is what survives an nftables
+	// ruleset stripping the fwmark (Docker/firewalld), where the marked packets
+	// would otherwise loop back into the tunnel and kill every probe.
+	xray.SetTunMode(mark, dev, hosts)
 
 	cfg, err := xray.BuildTunBridge(s.mainPort, name, mtu, s.loglevel())
 	if err != nil {
-		xray.SetTunMode(0, nil)
+		xray.SetTunMode(0, "", nil)
 		return fmt.Errorf("build bridge config: %w", err)
 	}
 	inst, err := Start(cfg)
 	if err != nil {
-		xray.SetTunMode(0, nil)
+		xray.SetTunMode(0, "", nil)
 		return fmt.Errorf("start bridge instance (Windows needs wintun.dll next to the exe): %w", err)
 	}
 
 	if err := s.tunMgr.Up(tun.Config{Name: name, Addr: addr, MTU: mtu, DNS: dns, DNSDirect: dnsDirect, Mark: mark, ServerIPs: ips}); err != nil {
 		_ = inst.Close()
-		xray.SetTunMode(0, nil)
+		xray.SetTunMode(0, "", nil)
 		return err
 	}
 
 	s.bridge = inst
 	s.tunOn = true
 	if mark != 0 {
-		s.logf("TUN up — all traffic via %s → exit; xray marked 0x%x to route off-tun", name, mark)
+		bind := dev
+		if bind == "" {
+			bind = "(uplink unknown — fwmark only)"
+		}
+		s.logf("TUN up — all traffic via %s → exit; xray bound to %s + marked 0x%x to stay off-tun", name, bind, mark)
 	} else {
 		s.logf("TUN up — all traffic via %s → exit (%d server IP(s) bypassed)", name, len(ips))
 	}
@@ -837,7 +845,7 @@ func (s *Supervisor) tunDown() {
 		s.tunErr = false
 		return
 	}
-	xray.SetTunMode(0, nil) // stop decorating configs
+	xray.SetTunMode(0, "", nil) // stop decorating configs
 	_ = s.tunMgr.Down()
 	if s.bridge != nil {
 		_ = s.bridge.Close()

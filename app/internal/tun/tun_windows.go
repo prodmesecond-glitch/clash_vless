@@ -27,6 +27,9 @@ func DefaultName() string { return "clashvless0" }
 // with explicit per-server bypass routes instead.
 func FwMark() int32 { return 0 }
 
+// UplinkDevice is unused off Linux (bypass is by explicit per-server routes).
+func UplinkDevice() string { return "" }
+
 // Privileged reports whether the process is running elevated (Administrators).
 func Privileged() bool {
 	var sid *windows.SID

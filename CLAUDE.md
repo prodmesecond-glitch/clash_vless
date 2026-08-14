@@ -74,10 +74,14 @@ For **TUN mode** the daemon must be elevated: `sudo clashvless run` (then attach
   **without churning routes**, and `apply()`/probe paths stay untouched. The OS layer moves the default
   route onto the tun (`0/1`+`128/1` halves) and keeps **xray's own connections off the tunnel** — vital,
   since the failover probes must egress-test candidate exits over a non-tun path or every "ping" fails.
-  On Linux that's **fwmark policy routing**: `xray.SetTunMode(mark,hosts)` makes `BuildConfig` stamp
-  `sockopt.mark` on every dial (live + probes), and a rule sends marked traffic to a private table out the
-  real uplink — so the main table stays clean (no per-server `/32`s) and probes work. Windows/macOS lack
-  fwmark, so they bypass by explicit per-server routes instead. DNS points at `TunDNS` (rides the tunnel);
+  On Linux that's **fwmark policy routing + SO_BINDTODEVICE**: `xray.SetTunMode(mark,dev,hosts)` makes
+  `BuildConfig` stamp both `sockopt.mark` **and** `sockopt.interface=<uplink dev>` on every dial (live +
+  probes); a rule sends marked traffic to a private table out the real uplink. The **device bind is the
+  robust half** — an nftables ruleset (Docker/firewalld) can strip the packet mark (conntrack), after which
+  the marked packets fall back to the main table and loop into the tun, killing every probe; SO_BINDTODEVICE
+  (`tun.UplinkDevice()`, Linux-only) can't be stripped, so xray's sockets physically leave the uplink
+  regardless. Main table stays clean (no per-server `/32`s). Windows/macOS lack both, so they bypass by
+  explicit per-server routes instead (`tun.UplinkDevice()` returns `""` there). DNS points at `TunDNS` (rides the tunnel);
   the exit's own domain resolves locally via injected `dns.hosts` (also from `SetTunMode`, needs `app/dns`)
   so bootstrap doesn't loop. **`TunDNSDirect`** (`tun dns direct|tunnel`, Config-tab toggle) pins `TunDNS`
   **off-tun** instead (a `/32` bypass via the real uplink on Linux; folded into the per-server bypass on

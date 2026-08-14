@@ -180,23 +180,30 @@ func BuildConfig(port int, main, entry json.RawMessage, entryPort int, logLevel,
 var (
 	tunMu    sync.RWMutex
 	tunMark  int32
+	tunDev   string
 	tunHosts map[string]string
 )
 
 // SetTunMode configures the decoration BuildConfig applies to every config it
-// produces (live and probe alike). mark=0 & hosts=nil disables it. The
+// produces (live and probe alike). mark=0, dev="" & hosts=nil disables it. The
 // supervisor sets it when TUN comes up and clears it when TUN goes down.
-func SetTunMode(mark int32, hosts map[string]string) {
+//
+// dev (Linux uplink device, e.g. "wlan0") makes every dial SO_BINDTODEVICE onto
+// the real uplink — the robust way to keep xray's own sockets off the tunnel:
+// unlike the SO_MARK fwmark trick, a device bind can't be stripped by an
+// nftables ruleset (Docker/firewalld), so it survives on hosts where the mark
+// gets cleared and the marked packets would otherwise loop back into the tun.
+func SetTunMode(mark int32, dev string, hosts map[string]string) {
 	tunMu.Lock()
-	tunMark, tunHosts = mark, hosts
+	tunMark, tunDev, tunHosts = mark, dev, hosts
 	tunMu.Unlock()
 }
 
 func applyTunMode(cfg map[string]any) {
 	tunMu.RLock()
-	mark, hosts := tunMark, tunHosts
+	mark, dev, hosts := tunMark, tunDev, tunHosts
 	tunMu.RUnlock()
-	if mark == 0 && len(hosts) == 0 {
+	if mark == 0 && dev == "" && len(hosts) == 0 {
 		return
 	}
 	if len(hosts) > 0 {
@@ -206,7 +213,7 @@ func applyTunMode(cfg map[string]any) {
 		}
 		cfg["dns"] = map[string]any{"hosts": h}
 	}
-	if mark == 0 { // no SO_MARK (non-Linux): bypass is done by explicit routes
+	if mark == 0 && dev == "" { // non-Linux: bypass is done by explicit routes
 		return
 	}
 	obs, _ := cfg["outbounds"].([]any)
@@ -225,7 +232,12 @@ func applyTunMode(cfg map[string]any) {
 			so = map[string]any{}
 			ss["sockopt"] = so
 		}
-		so["mark"] = mark
+		if mark != 0 {
+			so["mark"] = mark
+		}
+		if dev != "" {
+			so["interface"] = dev // SO_BINDTODEVICE — survives nftables mark-stripping
+		}
 	}
 }
 

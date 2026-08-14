@@ -31,8 +31,8 @@ func TestTunDecoratedConfigParses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	xray.SetTunMode(0x1a2b, map[string]string{"example.com": "1.2.3.4"})
-	defer xray.SetTunMode(0, nil) // don't leak decoration into other tests
+	xray.SetTunMode(0x1a2b, "eth0", map[string]string{"example.com": "1.2.3.4"})
+	defer xray.SetTunMode(0, "", nil) // don't leak decoration into other tests
 	live, err := xray.BuildConfig(2084, ob, nil, 0, "warning", "127.0.0.1")
 	if err != nil {
 		t.Fatal(err)
@@ -40,7 +40,8 @@ func TestTunDecoratedConfigParses(t *testing.T) {
 	if _, err := serial.LoadJSONConfig(bytes.NewReader(live)); err != nil {
 		t.Fatalf("xray rejected TUN-decorated config: %v\n%s", err, live)
 	}
-	if s := string(live); !strings.Contains(s, `"mark"`) || !strings.Contains(s, "1.2.3.4") {
-		t.Fatalf("decoration (mark + static host) missing:\n%s", s)
+	if s := string(live); !strings.Contains(s, `"mark"`) || !strings.Contains(s, `"interface"`) ||
+		!strings.Contains(s, "eth0") || !strings.Contains(s, "1.2.3.4") {
+		t.Fatalf("decoration (mark + bindToDevice + static host) missing:\n%s", s)
 	}
 }

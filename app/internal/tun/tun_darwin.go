@@ -27,6 +27,9 @@ func DefaultName() string { return "utun9" }
 // with explicit per-server bypass routes instead.
 func FwMark() int32 { return 0 }
 
+// UplinkDevice is unused off Linux (bypass is by explicit per-server routes).
+func UplinkDevice() string { return "" }
+
 func (m *Manager) run(name string, args ...string) error {
 	out, err := exec.Command(name, args...).CombinedOutput()
 	if err != nil {

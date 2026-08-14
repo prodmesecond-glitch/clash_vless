@@ -29,6 +29,12 @@ func DefaultName() string { return "clashvless0" }
 // them around the tunnel. Linux-only; other OSes return 0 (they bypass by route).
 func FwMark() int32 { return 0x1a2b }
 
+// UplinkDevice is the real egress interface (the default route's device). xray
+// SO_BINDTODEVICEs its own sockets onto it so they stay off the tunnel even when
+// an nftables ruleset (Docker/firewalld) strips the fwmark and the marked
+// packets would otherwise loop back into the tun. "" if undeterminable.
+func UplinkDevice() string { _, dev, _ := defaultRoute(); return dev }
+
 func (m *Manager) run(name string, args ...string) error {
 	out, err := exec.Command(name, args...).CombinedOutput()
 	if err != nil {
