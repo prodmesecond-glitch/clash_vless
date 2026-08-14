@@ -252,7 +252,7 @@ func BuildTunBridge(socksPort int, tunName string, mtu int, logLevel string) (js
 			"tag":      "tun-in",
 			"protocol": "tun",
 			"settings": map[string]any{"name": tunName, "MTU": mtu},
-			"sniffing": map[string]any{"enabled": true, "destOverride": []any{"http", "tls", "quic"}},
+			"sniffing": map[string]any{"enabled": true, "destOverride": []any{"http", "tls", "quic"}, "routeOnly": true},
 		}},
 		"outbounds": []any{map[string]any{
 			"tag":      "to-socks",
@@ -280,7 +280,7 @@ func socksInbound(tag string, port int, listen string) map[string]any {
 		"port":     port,
 		"protocol": "socks",
 		"settings": map[string]any{"auth": "noauth", "udp": true, "ip": "127.0.0.1"},
-		"sniffing": map[string]any{"enabled": true, "destOverride": []any{"http", "tls", "quic"}},
+		"sniffing": map[string]any{"enabled": true, "destOverride": []any{"http", "tls", "quic"}, "routeOnly": true},
 	}
 }
 

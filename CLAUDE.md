@@ -99,6 +99,11 @@ For **TUN mode** the daemon must be elevated: `sudo clashvless run` (then attach
   (TUN mode added `proxy/tun` + `app/dns`; `proxy/socks` also provides the bridge's socks *outbound*.)
 - Redact secrets (`id` / `publicKey` / `shortId` / `password`) when printing configs — see
   `redactSecrets` in `main.go`.
+- **Inbound sniffing is `routeOnly`** (`xray.go` socksInbound + `BuildTunBridge`): sniffing stays on
+  for routing, but must NOT `destOverride` the real destination — without `routeOnly` xray rewrites a
+  connection's dest to the sniffed host, which **silently hijacks an app's HTTP `CONNECT`** (e.g. an app
+  wiring its own HTTP proxy through our SOCKS/TUN: the `CONNECT proxytarget` is sniffed and rerouted to
+  the target, bypassing the proxy → hang). Plain HTTPS is unaffected (TLS sniffs to the same SNI host).
 - Keep code comments minimal: only a line for a constraint the code itself can't show.
 
 ## Doc rule (IMPORTANT)
