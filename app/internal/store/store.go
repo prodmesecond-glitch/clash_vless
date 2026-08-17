@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -120,7 +121,7 @@ type State struct {
 const DefaultUA = "Happ/3.13.0"
 
 // Version is the app version, shown in the TUI header and `version` command.
-const Version = "0.14.0"
+const Version = "0.14.1"
 
 func Dir() (string, error) {
 	base, err := os.UserConfigDir()
@@ -237,7 +238,30 @@ func (s *State) Save() error {
 	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return err
 	}
-	return os.Rename(tmp, s.path)
+	if err := os.Rename(tmp, s.path); err != nil {
+		return err
+	}
+	// An elevated daemon (sudo, for TUN) would otherwise leave state root-owned,
+	// locking out the rootless TUI that reads it. Hand it back to the invoker.
+	ReownToInvoker(filepath.Dir(s.path))
+	ReownToInvoker(s.path)
+	return nil
+}
+
+// ReownToInvoker best-effort hands a file/dir the elevated daemon created back to
+// the user who launched it via sudo (SUDO_UID/SUDO_GID), so a rootless
+// `clashvless` can read the state and connect to the control socket. No-op unless
+// running as root under sudo. Errors are ignored (best-effort).
+func ReownToInvoker(path string) {
+	if os.Geteuid() != 0 {
+		return
+	}
+	uid, err1 := strconv.Atoi(os.Getenv("SUDO_UID"))
+	gid, err2 := strconv.Atoi(os.Getenv("SUDO_GID"))
+	if err1 != nil || err2 != nil || uid == 0 {
+		return
+	}
+	_ = os.Chown(path, uid, gid)
 }
 
 // FilePath returns the on-disk state file currently in use.

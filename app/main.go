@@ -278,6 +278,13 @@ func runTUI(st *store.State) error {
 	if client, err := control.Dial(sock); err == nil {
 		defer client.Close()
 		return tui.RunClient(client, false)
+	} else if errors.Is(err, os.ErrPermission) {
+		// A daemon IS running but its socket is owned by another user (a root/TUN
+		// daemon started without sudo's SUDO_UID). Do NOT fall through to the
+		// embedded path — it would delete a live daemon's socket. Guide instead.
+		return fmt.Errorf("a daemon is already running on %s but owned by another user (root?) —\n"+
+			"  attach it as that user (`sudo clashvless`), or restart the daemon so it hands the\n"+
+			"  socket back to you (running it via `sudo clashvless run …` does this from v0.14.1)", sock)
 	}
 	stop := startEmbeddedDaemon(st)
 	defer stop()

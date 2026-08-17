@@ -13,6 +13,10 @@ or a **system-wide TUN** — with automatic tiered failover.
   - `internal/xray` — `vless://` → xray outbound, and full-config assembly (incl. entry→main chaining).
   - `internal/engine` — embeds xray-core in-process; the failover supervisor + real-egress pool probe.
   - `internal/control` — daemon↔client IPC over a Unix socket: `run` serves it; `tui`/`status` attach.
+    An **elevated daemon** (`sudo … run`, needed for TUN) hands the control socket **and** the state file
+    back to the invoking user via `store.ReownToInvoker` (chown to `$SUDO_UID/$SUDO_GID`), so a **rootless
+    `clashvless`** attaches instead of falling back to an embedded engine. And `runTUI` no longer deletes a
+    socket it only got `EACCES` on (that used to clobber a live root daemon) — it errors with guidance.
   - `internal/tui` — Bubble Tea dashboard client (Status / Subs / Main / Log / Config); `wizard.go`
     is the first-run setup wizard (sub → proxy → HWID → fetch → review → exit, with a non-plain warning).
     Mains & sub nodes show a proto tag (`store.ProtoTag`/`OutboundProtoTag`: plain·reality·vision·grpc·ws·tls·xhttp).

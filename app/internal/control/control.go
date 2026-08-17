@@ -84,6 +84,7 @@ func (s *Server) Serve(ctx context.Context, socketPath string) error {
 		return err
 	}
 	_ = os.Chmod(socketPath, 0o600)
+	store.ReownToInvoker(socketPath) // sudo daemon → let the rootless TUI attach
 	go func() {
 		<-ctx.Done()
 		ln.Close()
