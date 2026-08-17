@@ -217,8 +217,11 @@ func (m *model) handleInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.setCfg(m.cfgCursor, v)
 			}
 		case inputEditStr:
-			m.apply(func(st *store.State) { st.FetchProxy = strings.TrimSpace(raw) })
-			m.busy = "saved ✓"
+			if idx := m.cfgCursor - len(cfgFields); idx >= 0 && idx < len(cfgStrFields) {
+				val := strings.TrimSpace(raw)
+				m.apply(func(st *store.State) { cfgStrFields[idx].set(st, val) })
+				m.busy = "saved ✓"
+			}
 		}
 	case tea.KeyBackspace, tea.KeyDelete:
 		if r := []rune(m.inputBuf); len(r) > 0 {
@@ -362,27 +365,29 @@ func (m *model) subRows() []subRow {
 }
 
 func (m *model) handleConfigKey(msg tea.KeyMsg) {
-	proxyRow := len(cfgFields) // the one free-text row lives just past the int fields
+	firstStr := len(cfgFields) // free-text rows live just past the int fields
+	maxRow := firstStr + len(cfgStrFields) - 1
 	switch msg.String() {
 	case "up", "k":
 		if m.cfgCursor > 0 {
 			m.cfgCursor--
 		}
 	case "down", "j":
-		if m.cfgCursor < proxyRow {
+		if m.cfgCursor < maxRow {
 			m.cfgCursor++
 		}
 	case "left", "h", "-":
-		if m.cfgCursor < proxyRow {
+		if m.cfgCursor < firstStr {
 			m.setCfg(m.cfgCursor, cfgFields[m.cfgCursor].get(m.st)-1)
 		}
 	case "right", "l", "+", "=":
-		if m.cfgCursor < proxyRow {
+		if m.cfgCursor < firstStr {
 			m.setCfg(m.cfgCursor, cfgFields[m.cfgCursor].get(m.st)+1)
 		}
 	case "enter":
-		if m.cfgCursor == proxyRow {
-			m.inputMode, m.inputBuf, m.busy = inputEditStr, m.st.FetchProxy, "type host:port, Enter to save"
+		if m.cfgCursor >= firstStr {
+			f := cfgStrFields[m.cfgCursor-firstStr]
+			m.inputMode, m.inputBuf, m.busy = inputEditStr, f.get(m.st), f.hint
 		} else {
 			m.inputMode, m.inputBuf, m.busy = inputEditCfg, "", "type a value, Enter to save"
 		}
@@ -457,7 +462,7 @@ var cfgFields = []cfgField{
 	{"Pin tier", func(st *store.State) int { return st.PinTier }, func(st *store.State, v int) { st.PinTier = v }, 0, 3, pinLabel, "0 = auto cascade"},
 	{"Force hop (skip T1)", func(st *store.State) int { return b2i(st.ForceHop) }, func(st *store.State, v int) { st.ForceHop = v != 0 }, 0, 1, onOff, "always route through a hop — hop test"},
 	{"TUN mode (all traffic)", func(st *store.State) int { return b2i(st.TunEnabled) }, func(st *store.State, v int) { st.TunEnabled = v != 0 }, 0, 1, onOff, "system-wide capture; daemon must be root/admin"},
-	{"TUN DNS direct (off-tun)", func(st *store.State) int { return b2i(st.TunDNSDirect) }, func(st *store.State, v int) { st.TunDNSDirect = v != 0 }, 0, 1, onOff, "resolve DNS on the real net — breaks the domain-node bootstrap deadlock (set tun_dns to a reachable resolver)"},
+	{"TUN DNS", func(st *store.State) int { return b2i(st.TunDNSDirect) }, func(st *store.State, v int) { st.TunDNSDirect = v != 0 }, 0, 1, dnsModeLabel, "real-net = your LAN resolver off-tun · static routed = via the exit"},
 	{"Listen port", func(st *store.State) int { return st.ListenPort }, func(st *store.State, v int) { st.ListenPort = v }, 1024, 65535, nil, "restart to apply"},
 	{"Allow LAN (0.0.0.0)", func(st *store.State) int {
 		if st.ListenHost() == "127.0.0.1" {
@@ -474,6 +479,22 @@ var cfgFields = []cfgField{
 	{"First-hop port", func(st *store.State) int { return st.EntryPort }, func(st *store.State, v int) { st.EntryPort = v }, 0, 65535, entryPortLabel, "0 = auto (listen+1); restart to apply"},
 	{"Log level", func(st *store.State) int { return logLevelIdx(st.Loglevel()) }, func(st *store.State, v int) { st.LogLevel = logLevels[clamp(v, 0, len(logLevels)-1)] }, 0, 4, logLevelLabel, "xray verbosity; restart daemon to apply"},
 	{"Use fetch proxy", func(st *store.State) int { return b2i(st.UseFetchProxy) }, func(st *store.State, v int) { st.UseFetchProxy = v != 0 }, 0, 1, onOff, "fetch subs via the proxy below"},
+}
+
+// cfgStrFields are the free-text (string) rows, rendered just past the numeric
+// cfgFields in the Config tab. Enter edits them inline.
+type strField struct {
+	label string
+	get   func(*store.State) string
+	set   func(*store.State, string)
+	empty string // shown when the value is unset
+	note  string
+	hint  string // status-line prompt while editing
+}
+
+var cfgStrFields = []strField{
+	{"Fetch proxy", func(st *store.State) string { return st.FetchProxy }, func(st *store.State, v string) { st.FetchProxy = v }, "(unset)", "host:port (SOCKS5)", "type host:port, Enter to save"},
+	{"TUN static DNS", func(st *store.State) string { return st.TunStaticDNS }, func(st *store.State, v string) { st.TunStaticDNS = v }, "8.8.8.8 (default)", "resolver when TUN DNS = static routed", "type an IP, Enter to save"},
 }
 
 // --- styles ------------------------------------------------------------------
@@ -866,19 +887,22 @@ func (m *model) configView() string {
 		}
 		b.WriteString(line + "\n")
 	}
-	// Fetch proxy — the one free-text (host:port) setting.
-	pi := len(cfgFields)
-	shown := m.st.FetchProxy
-	if m.inputMode == inputEditStr && m.cfgCursor == pi {
-		shown = m.inputBuf + "▏"
-	} else if shown == "" {
-		shown = "(unset)"
-	}
-	label := fmt.Sprintf("%-20s", "Fetch proxy")
-	if m.cfgCursor == pi {
-		b.WriteString(activeStyle.Render(fmt.Sprintf("▸ %s %s", label, shown)) + dimStyle.Render("   host:port (SOCKS5)") + "\n")
-	} else {
-		b.WriteString(fmt.Sprintf("  %s ", label) + dimStyle.Render(shown+"   host:port (SOCKS5)") + "\n")
+	// Free-text (string) settings, rendered past the numeric fields.
+	firstStr := len(cfgFields)
+	for j, f := range cfgStrFields {
+		idx := firstStr + j
+		shown := f.get(m.st)
+		if m.inputMode == inputEditStr && m.cfgCursor == idx {
+			shown = m.inputBuf + "▏"
+		} else if shown == "" {
+			shown = f.empty
+		}
+		label := fmt.Sprintf("%-20s", f.label)
+		if m.cfgCursor == idx {
+			b.WriteString(activeStyle.Render(fmt.Sprintf("▸ %s %s", label, shown)) + dimStyle.Render("   "+f.note) + "\n")
+		} else {
+			b.WriteString(fmt.Sprintf("  %s ", label) + dimStyle.Render(shown+"   "+f.note) + "\n")
+		}
 	}
 	return b.String()
 }
@@ -1033,6 +1057,13 @@ func onOff(v int) string {
 		return "on"
 	}
 	return "off"
+}
+
+func dnsModeLabel(v int) string {
+	if v != 0 {
+		return "real-net"
+	}
+	return "static routed"
 }
 
 var logLevels = []string{"none", "error", "warning", "info", "debug"}

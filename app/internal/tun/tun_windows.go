@@ -30,6 +30,11 @@ func FwMark() int32 { return 0 }
 // UplinkDevice is unused off Linux (bypass is by explicit per-server routes).
 func UplinkDevice() string { return "" }
 
+// SystemResolver has no /etc/resolv.conf equivalent to read on Windows, so
+// DIRECT-mode DNS can't auto-adopt the system resolver here — the user sets one
+// explicitly with `tun dns <ip>`. Returns "".
+func SystemResolver() string { return "" }
+
 // Privileged reports whether the process is running elevated (Administrators).
 func Privileged() bool {
 	var sid *windows.SID

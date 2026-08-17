@@ -779,8 +779,17 @@ func (s *Supervisor) tunUp() error {
 	}
 	mtu := s.cfgInt(func(st *store.State) int { return st.TunMTUOr() })
 	addr := s.cfgStr(func(st *store.State) string { return st.TunAddress() })
-	dns := s.cfgStr(func(st *store.State) string { return st.TunResolver() })
-	dnsDirect := s.cfgBool(func(st *store.State) bool { return st.TunDNSDirect })
+	// realNet ("real-net" DNS) resolves off-tun; "static routed" rides the exit.
+	realNet := s.cfgBool(func(st *store.State) bool { return st.TunDNSDirect })
+	// Pick the resolver BEFORE osUp rewrites /etc/resolv.conf: real-net adopts the
+	// host's pre-TUN resolver (no public default — a corp LAN may firewall 8.8.8.8,
+	// and a LAN resolver is unreachable through the exit); static routed uses
+	// TunStaticDNS (default 8.8.8.8, rides the exit).
+	dns := tun.ResolverFor(realNet, s.cfgStr(func(st *store.State) string { return st.TunStaticDNS }))
+	dnsDirect := realNet
+	if dns == "" && realNet {
+		s.logf("TUN: DNS mode real-net but no system resolver was detected — set one with `tun dns <ip>` or switch to static routed, else DNS will fail")
+	}
 
 	// Resolve every server host on the real network (before the tunnel captures
 	// the default route): the IPs for the Windows/macOS bypass list, and a

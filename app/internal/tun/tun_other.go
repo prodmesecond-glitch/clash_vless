@@ -19,6 +19,9 @@ func FwMark() int32 { return 0 }
 // UplinkDevice is unused off Linux (bypass is by explicit per-server routes).
 func UplinkDevice() string { return "" }
 
+// SystemResolver is unused on unsupported OSes.
+func SystemResolver() string { return "" }
+
 func (m *Manager) osUp(cfg Config) error {
 	return errors.New("TUN mode is only supported on Linux, Windows, and macOS")
 }

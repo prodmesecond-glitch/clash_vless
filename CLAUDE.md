@@ -81,14 +81,22 @@ For **TUN mode** the daemon must be elevated: `sudo clashvless run` (then attach
   the marked packets fall back to the main table and loop into the tun, killing every probe; SO_BINDTODEVICE
   (`tun.UplinkDevice()`, Linux-only) can't be stripped, so xray's sockets physically leave the uplink
   regardless. Main table stays clean (no per-server `/32`s). Windows/macOS lack both, so they bypass by
-  explicit per-server routes instead (`tun.UplinkDevice()` returns `""` there). DNS points at `TunDNS` (rides the tunnel);
-  the exit's own domain resolves locally via injected `dns.hosts` (also from `SetTunMode`, needs `app/dns`)
-  so bootstrap doesn't loop. **`TunDNSDirect`** (`tun dns direct|tunnel`, Config-tab toggle) pins `TunDNS`
-  **off-tun** instead (a `/32` bypass via the real uplink on Linux; folded into the per-server bypass on
-  Win/mac) — so **domain-named nodes/exits resolve immediately** rather than through a not-yet-up tunnel
-  (the bootstrap deadlock); trades DNS privacy, so point `TunDNS` at a resolver that answers on the real
-  network. `tun dns <ip>` sets the resolver. IPv4 only (IPv6 isn't tunneled → disable it if leaks matter).
-  Needs root/admin.
+  explicit per-server routes instead (`tun.UplinkDevice()` returns `""` there). The exit's own domain
+  resolves locally via injected `dns.hosts` (also from `SetTunMode`, needs `app/dns`) so bootstrap doesn't loop.
+  - **DNS routing** (`tun.ResolverFor(realNet, staticDNS)` picks the resolver, chosen in `tunUp` **before**
+    `osUp` rewrites `resolv.conf`): two named modes via **`TunDNSDirect`** (the Config-tab **TUN DNS** row shows
+    `real-net` / `static routed`; CLI `tun dns real-net|static`):
+    - **`static routed`** (default, `TunDNSDirect=false`): queries ride the tunnel to the exit, resolving at
+      **`TunStaticDNS`** (its own field, default **`8.8.8.8`** — public, reachable from the exit; editable in the
+      Config tab or `tun dns <ip>`, reset with `tun dns auto`). No leak.
+    - **`real-net`** (`TunDNSDirect=true`): pins the resolver **off-tun** (`/32` via the real uplink on Linux;
+      folded into the per-server bypass on Win/mac) so **domain-named nodes/exits resolve immediately** rather
+      than through a not-yet-up tunnel (the bootstrap deadlock). Has **no public default** — it adopts the host's
+      **pre-TUN system resolver** (`tun.SystemResolver()`: first non-loopback IPv4 in `/etc/resolv.conf`,
+      `resolvectl` fallback for the systemd stub; Linux/macOS only), because a public default like `8.8.8.8` is
+      often firewalled on a corporate LAN and a LAN resolver is unreachable through the exit.
+
+    IPv4 only (IPv6 isn't tunneled → disable it if leaks matter). Needs root/admin.
   Linux and macOS
   are tested and working; **Windows is code-complete but author-untested** (needs `wintun.dll` beside the
   exe). macOS uses a kernel-named `utunN` device and per-service DNS.

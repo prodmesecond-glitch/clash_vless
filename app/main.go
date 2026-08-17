@@ -165,7 +165,7 @@ func run(args []string) error {
 		fmt.Println("  fetch-proxy [addr|off]  fetch subs through a proxy: socks5://h:p, http://h:p, or h:p (socks5)")
 		fmt.Println("  loglevel [none|error|warning|info|debug]  xray log verbosity")
 		fmt.Println("  tun [on|off|status]   system-wide TUN capture (Linux/Windows; daemon must be root/admin)")
-		fmt.Println("  tun dns <ip>|direct|tunnel   set the TUN resolver / route it off-tun or through the exit")
+		fmt.Println("  tun dns real-net|static|<ip>|auto   DNS mode (real-net = your LAN resolver off-tun · static routed = via the exit) / set the static resolver")
 		fmt.Println("  list             show active nodes (two pools)")
 		fmt.Println("  gen [entry]      print the xray config for main, optionally chained via a cached node")
 		fmt.Println("  up [entry]       start xray in-process (chained via [entry] also exposes hop-1 on its own port)")
@@ -512,26 +512,30 @@ func cmdTun(st *store.State, args []string) error {
 		}
 		return nil
 	case "dns":
-		// tun dns <ip>            — set the resolver
-		// tun dns direct|tunnel   — route it off-tun (breaks the bootstrap deadlock) or through the exit
+		// tun dns real-net|static  — DNS mode (resolve on the real net vs routed through the exit)
+		// tun dns <ip>             — set the static-routed resolver
+		// tun dns auto             — reset it to 8.8.8.8
 		if len(args) < 2 {
-			fmt.Printf("TUN DNS: %s  (%s)\n", st.TunResolver(), tunDNSModeLabel(st.TunDNSDirect))
-			fmt.Println("usage: clashvless tun dns <ip>  |  tun dns direct|tunnel")
+			fmt.Printf("TUN DNS: %s\n", tunDNSDisplay(st))
+			fmt.Println("usage: clashvless tun dns real-net | static | <ip> | auto")
 			return nil
 		}
 		switch v := strings.ToLower(strings.TrimSpace(args[1])); v {
-		case "direct", "off-tun":
-			fmt.Println("TUN DNS → DIRECT (resolves off-tun on the real network — breaks the domain-node deadlock)")
+		case "real-net", "realnet", "real", "direct", "off-tun", "lan":
+			fmt.Println("TUN DNS → real-net (resolves off-tun on your real network — breaks the domain-node deadlock)")
 			return apply(map[string]any{"tun_dns_direct": true}, func(s *store.State) { s.TunDNSDirect = true })
-		case "tunnel", "through", "via-tunnel":
-			fmt.Println("TUN DNS → THROUGH TUNNEL (default; no DNS leak, needs the exit up)")
+		case "static", "static-routed", "routed", "tunnel", "through":
+			fmt.Println("TUN DNS → static routed (through the exit to the static resolver; no DNS leak)")
 			return apply(map[string]any{"tun_dns_direct": false}, func(s *store.State) { s.TunDNSDirect = false })
+		case "auto", "default":
+			fmt.Println("TUN static-routed resolver → 8.8.8.8 (default)")
+			return apply(map[string]any{"tun_static_dns": ""}, func(s *store.State) { s.TunStaticDNS = "" })
 		default:
 			if net.ParseIP(v) == nil {
-				return fmt.Errorf("not an IP: %q — use `tun dns <ip>` or `tun dns direct|tunnel`", args[1])
+				return fmt.Errorf("not an IP or mode: %q — use `tun dns real-net|static`, `tun dns <ip>`, or `tun dns auto`", args[1])
 			}
-			fmt.Printf("TUN DNS resolver → %s\n", v)
-			return apply(map[string]any{"tun_dns": v}, func(s *store.State) { s.TunDNS = v })
+			fmt.Printf("TUN static-routed resolver → %s\n", v)
+			return apply(map[string]any{"tun_static_dns": v}, func(s *store.State) { s.TunStaticDNS = v })
 		}
 	case "status", "":
 		name := st.TunName
@@ -541,19 +545,24 @@ func cmdTun(st *store.State, args []string) error {
 		fmt.Printf("TUN mode: %s\n", onOff(st.TunEnabled))
 		fmt.Printf("  os support: %v   this process privileged: %v\n", tun.Supported(), tun.Privileged())
 		fmt.Printf("  device %s   addr %s   mtu %d\n", name, st.TunAddress(), st.TunMTUOr())
-		fmt.Printf("  dns %s  (%s)\n", st.TunResolver(), tunDNSModeLabel(st.TunDNSDirect))
+		fmt.Printf("  dns %s\n", tunDNSDisplay(st))
 		return nil
 	default:
-		return fmt.Errorf("usage: clashvless tun [on|off|status|dns <ip>|dns direct|dns tunnel]")
+		return fmt.Errorf("usage: clashvless tun [on|off|status|dns real-net|static|<ip>|auto]")
 	}
 }
 
-// tunDNSModeLabel describes how TUN DNS is routed.
-func tunDNSModeLabel(direct bool) string {
-	if direct {
-		return "direct / off-tun"
+// tunDNSDisplay is the DNS mode + effective resolver, for `tun status` and
+// `tun dns`. Mirrors tun.ResolverFor's choice.
+func tunDNSDisplay(st *store.State) string {
+	if st.TunDNSDirect {
+		r := tun.ResolverFor(true, "")
+		if r == "" {
+			return "real-net (no system resolver detected — set `tun dns <ip>` or use static)"
+		}
+		return "real-net → " + r + " (your current resolver, off-tun)"
 	}
-	return "through tunnel"
+	return "static routed → " + st.TunStaticResolver() + " (via the exit)"
 }
 
 func onOff(b bool) string {

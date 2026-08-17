@@ -87,7 +87,7 @@ clashvless main add '<vless://…>'         # add a final exit (plain hops freel
 | `gen [entry]` | print the assembled xray config for a tier |
 | `run` | headless failover engine |
 | `tun [on\|off\|status]` | system-wide TUN capture (needs a root/admin daemon — see below) |
-| `tun dns <ip>` · `tun dns direct\|tunnel` | set the TUN resolver · route DNS off-tun or through the exit |
+| `tun dns real-net\|static` · `tun dns <ip>\|auto` | DNS mode (resolve on your LAN vs via the exit) · set/reset the static resolver |
 | `tui` | the dashboard (default with no args) |
 | `whoami` | show this device's panel identity |
 
@@ -111,14 +111,19 @@ clashvless tun off         # back to SOCKS-only
 the device, so failover swaps the exit behind the stable SOCKS port **without dropping the tunnel** or
 touching routes. The default route is moved onto the TUN; the proxy **server IPs are auto-bypassed**
 (routed direct via your real gateway) so the exit connection doesn't loop back into the tunnel; and DNS is
-pointed at a resolver whose queries ride the tunnel (no leaks to your ISP's resolver). The exit's own
-domain resolves locally, so bootstrap never chicken-and-eggs.
+set up per the mode below. The exit's own domain resolves locally, so bootstrap never chicken-and-eggs.
 
-If your exit/nodes are **domain-named** and TUN comes up stuck on `all tiers unreachable`, it's the DNS
-bootstrap deadlock — resolving those names goes through a tunnel that isn't up yet. Flip DNS to resolve on
-the real network instead: `clashvless tun dns direct` (or the **TUN DNS direct** toggle in the Config tab),
-and point it at a resolver that answers there with `clashvless tun dns <ip>`. This trades DNS privacy for
-getting the tunnel to bootstrap.
+**DNS.** Two modes — the **TUN DNS** row in the Config tab, or `clashvless tun dns real-net|static`:
+
+- **static routed** (default): DNS queries ride the tunnel and exit at the VPN server's network — no leak to
+  your ISP's resolver. Resolves at a **static DNS** that defaults to `8.8.8.8` (reachable from the exit); set
+  your own in the Config tab's **TUN static DNS** field or with `clashvless tun dns <ip>` (`tun dns auto`
+  resets it to `8.8.8.8`).
+- **real-net**: DNS resolves on the **real** local network (off-tun). Use this if your exit/nodes are
+  **domain-named** and TUN comes up stuck on `all tiers unreachable` — the bootstrap deadlock, where
+  resolving those names needs a tunnel that isn't up yet. real-net **auto-adopts the resolver you were
+  already using before TUN** (from `/etc/resolv.conf`), so it just works on networks that firewall public
+  resolvers like `8.8.8.8` or hand out a private LAN resolver. Trades DNS privacy for bootstrapping.
 
 **Notes / limits**
 - **`ping` doesn't traverse the tunnel** — xray's TUN forwards **TCP and UDP only, not ICMP**. So

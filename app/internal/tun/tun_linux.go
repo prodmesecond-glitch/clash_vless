@@ -4,6 +4,7 @@ package tun
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"strconv"
@@ -34,6 +35,34 @@ func FwMark() int32 { return 0x1a2b }
 // an nftables ruleset (Docker/firewalld) strips the fwmark and the marked
 // packets would otherwise loop back into the tun. "" if undeterminable.
 func UplinkDevice() string { _, dev, _ := defaultRoute(); return dev }
+
+// SystemResolver returns the resolver the host used before TUN (the first
+// non-loopback IPv4 nameserver in /etc/resolv.conf). This is what DIRECT-mode
+// DNS adopts so queries keep working on the real network — no public default,
+// which a corporate LAN often firewalls. Falls back to systemd-resolved's real
+// upstream (via resolvectl) when resolv.conf is just the 127.0.0.53 stub.
+// Returns "" if none can be determined.
+func SystemResolver() string {
+	if b, err := os.ReadFile(resolvConf); err == nil {
+		for _, ln := range strings.Split(string(b), "\n") {
+			f := strings.Fields(ln)
+			if len(f) >= 2 && f[0] == "nameserver" {
+				if ip := net.ParseIP(f[1]); ip != nil && ip.To4() != nil && !ip.IsLoopback() {
+					return f[1]
+				}
+			}
+		}
+	}
+	// resolv.conf was the loopback stub — ask systemd-resolved for the upstream.
+	if out, err := exec.Command("resolvectl", "dns").Output(); err == nil {
+		for _, tok := range strings.Fields(string(out)) {
+			if ip := net.ParseIP(strings.TrimRight(tok, ",")); ip != nil && ip.To4() != nil && !ip.IsLoopback() {
+				return ip.String()
+			}
+		}
+	}
+	return ""
+}
 
 func (m *Manager) run(name string, args ...string) error {
 	out, err := exec.Command(name, args...).CombinedOutput()

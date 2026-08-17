@@ -4,6 +4,7 @@ package tun
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"strings"
@@ -29,6 +30,26 @@ func FwMark() int32 { return 0 }
 
 // UplinkDevice is unused off Linux (bypass is by explicit per-server routes).
 func UplinkDevice() string { return "" }
+
+// SystemResolver returns the resolver the host used before TUN (first
+// non-loopback IPv4 nameserver in /etc/resolv.conf, which macOS keeps in sync
+// with the primary service). DIRECT-mode DNS adopts it so queries keep working
+// on the real network. Returns "" if none can be determined.
+func SystemResolver() string {
+	b, err := os.ReadFile("/etc/resolv.conf")
+	if err != nil {
+		return ""
+	}
+	for _, ln := range strings.Split(string(b), "\n") {
+		f := strings.Fields(ln)
+		if len(f) >= 2 && f[0] == "nameserver" {
+			if ip := net.ParseIP(f[1]); ip != nil && ip.To4() != nil && !ip.IsLoopback() {
+				return f[1]
+			}
+		}
+	}
+	return ""
+}
 
 func (m *Manager) run(name string, args ...string) error {
 	out, err := exec.Command(name, args...).CombinedOutput()

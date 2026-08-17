@@ -88,6 +88,28 @@ func (m *Manager) Down() error {
 	return err
 }
 
+// ResolverFor picks the effective TUN DNS resolver for the chosen mode:
+//
+//   - realNet ("real-net"): resolve on the real local network, so it adopts the
+//     system's current (pre-TUN) resolver — deliberately NO public default, which
+//     a corporate LAN may firewall and which a private LAN resolver can't reach
+//     through the exit. "" means "couldn't detect one — set `tun dns <ip>` or use
+//     static routed".
+//   - !realNet ("static routed"): the query rides the tunnel to the exit, so it
+//     uses staticDNS, defaulting to 8.8.8.8 when unset.
+//
+// Call it BEFORE osUp rewrites /etc/resolv.conf so SystemResolver() sees the
+// resolver that was active before TUN.
+func ResolverFor(realNet bool, staticDNS string) string {
+	if realNet {
+		return SystemResolver()
+	}
+	if staticDNS != "" {
+		return staticDNS
+	}
+	return "8.8.8.8"
+}
+
 // cidrIPMask splits "198.18.0.1/30" into a host IP ("198.18.0.1") and a dotted
 // netmask ("255.255.255.252") — the form Windows' netsh/route want.
 func cidrIPMask(cidr string) (ip, mask string, err error) {
