@@ -121,10 +121,18 @@ func (m *Manager) osUp(cfg Config) error {
 		m.logf("tun: LAN bypass on — private ranges kept off-tun (local-only resources reachable)")
 	}
 
+	// Block IPv6: the tunnel is IPv4-only, so a dual-stack app would leak out over
+	// v6. Route global-unicast v6 into the tun (best-effort — untested on Windows)
+	// so it can't escape on the real network.
+	if cfg.BlockIPv6 {
+		m.runSoft("netsh", "interface", "ipv6", "add", "route", IPv6BlockRange, "interface="+cfg.Name)
+		m.logf("tun: IPv6 routed into %s (best-effort v6 leak block)", cfg.Name)
+	}
+
 	if cfg.DNS != "" {
 		m.runSoft("netsh", "interface", "ip", "set", "dns", "name="+cfg.Name, "static", cfg.DNS)
 	}
-	m.logf("tun: up — default routed through %s (IPv6 is not tunneled)", cfg.Name)
+	m.logf("tun: up — default routed through %s (IPv6 blocked)", cfg.Name)
 	return nil
 }
 
@@ -139,6 +147,9 @@ func (m *Manager) osDown() error {
 		}
 	}
 	m.reconcileBypass(nil)
+	if m.cfg.BlockIPv6 {
+		m.runSoft("netsh", "interface", "ipv6", "delete", "route", IPv6BlockRange, "interface="+m.cfg.Name)
+	}
 	if m.cfg.DNS != "" {
 		m.runSoft("netsh", "interface", "ip", "set", "dns", "name="+m.cfg.Name, "dhcp")
 	}

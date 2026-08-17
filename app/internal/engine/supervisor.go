@@ -798,6 +798,7 @@ func (s *Supervisor) tunUp() error {
 	mark := tun.FwMark()
 	dev := tun.UplinkDevice()
 	bypassLAN := s.cfgBool(func(st *store.State) bool { return st.TunBypassLAN() })
+	blockIPv6 := s.cfgBool(func(st *store.State) bool { return st.TunBlockIPv6() })
 
 	// DNS-direct: reach the resolver off-tun. Linux pins a /32 (see osUp); on
 	// Windows/macOS fold the resolver IP into the per-server bypass list.
@@ -829,7 +830,7 @@ func (s *Supervisor) tunUp() error {
 		return fmt.Errorf("start bridge instance (Windows needs wintun.dll next to the exe): %w", err)
 	}
 
-	if err := s.tunMgr.Up(tun.Config{Name: name, Addr: addr, MTU: mtu, DNS: dns, DNSDirect: dnsDirect, Mark: mark, ServerIPs: ips, BypassLAN: bypassLAN}); err != nil {
+	if err := s.tunMgr.Up(tun.Config{Name: name, Addr: addr, MTU: mtu, DNS: dns, DNSDirect: dnsDirect, Mark: mark, ServerIPs: ips, BypassLAN: bypassLAN, BlockIPv6: blockIPv6}); err != nil {
 		_ = inst.Close()
 		xray.SetTunMode(0, "", nil)
 		return err

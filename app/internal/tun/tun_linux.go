@@ -147,6 +147,15 @@ func (m *Manager) osUp(cfg Config) error {
 		m.logf("tun: LAN bypass on — private ranges kept off-tun (local-only resources reachable)")
 	}
 
+	// Block global-unicast IPv6: the tunnel is IPv4-only, so without this a
+	// dual-stack app happy-eyeballs out over v6 and leaks the real address. An
+	// "unreachable" route fails the v6 connect fast so it falls back to the
+	// tunneled v4 (link-local/ULA are untouched).
+	if cfg.BlockIPv6 {
+		m.runSoft("ip", "-6", "route", "add", "unreachable", IPv6BlockRange)
+		m.logf("tun: IPv6 blocked (%s unreachable) — no v6 leak past the IPv4-only tunnel", IPv6BlockRange)
+	}
+
 	if cfg.DNS != "" {
 		if cfg.DNSDirect {
 			// Pin the resolver off the tunnel (its own /32 out the real uplink) so
@@ -172,6 +181,9 @@ func (m *Manager) osDown() error {
 		for _, c := range LANBypassRanges.OnLink {
 			m.runSoft("ip", "route", "del", c, "dev", m.origDev, "scope", "link")
 		}
+	}
+	if m.cfg.BlockIPv6 {
+		m.runSoft("ip", "-6", "route", "del", "unreachable", IPv6BlockRange)
 	}
 	mark := strconv.Itoa(int(m.cfg.Mark))
 	m.runSoft("ip", "rule", "del", "fwmark", mark, "table", fwTable)

@@ -27,7 +27,16 @@ type Config struct {
 	Mark      int32    // SO_MARK xray stamps on its sockets; Linux steers marked traffic off-tun (0 = none)
 	ServerIPs []net.IP // Windows/macOS: server IPs to route direct (Linux uses Mark instead)
 	BypassLAN bool     // keep private/LAN ranges (LANBypassRanges) off the tunnel so local-only resources stay reachable
+	BlockIPv6 bool     // block global-unicast IPv6 (IPv6BlockRange) so it can't leak past the IPv4-only tunnel
 }
+
+// IPv6BlockRange is the global-unicast IPv6 space blocked when Config.BlockIPv6
+// is set. The tunnel is IPv4-only, so without this a dual-stack app would
+// happy-eyeballs straight out over v6 and leak the real address; a fast-failing
+// (reject/unreachable) route over this range forces fallback to the tunneled v4.
+// Only 2000::/3 (globally routable) is blocked — link-local (fe80::/10) and ULA
+// (fc00::/7) are left alone so LAN-local v6 keeps working.
+const IPv6BlockRange = "2000::/3"
 
 // LANBypassRanges are the private/local IPv4 CIDRs kept OFF the tunnel when
 // Config.BypassLAN is set, so LAN-only resources (corp intranet, printers, NAS,
@@ -56,6 +65,7 @@ type Manager struct {
 	savedResolv []byte          // Linux: original /etc/resolv.conf (plain file) · macOS: prior DNS servers
 	resolvLink  bool            // Linux: systemd-resolved path taken
 	dnsService  string          // macOS: network service whose DNS we changed
+	v6Service   string          // macOS: network service whose IPv6 we turned off (restore on down)
 	bypass      map[string]bool // server IPs we routed around the tunnel
 }
 

@@ -147,7 +147,10 @@ route private ranges through the exit too.
 - **Windows** needs `wintun.dll` next to the executable (from [wintun.net](https://www.wintun.net/)).
 - **macOS** uses a kernel-named `utunN` device (xray requires the `utunN` form); the default is `utun9` —
   set `tun_name` to another `utunN` if that unit is busy.
-- **IPv4 only** — IPv6 is not tunneled; disable IPv6 if leaks matter.
+- **IPv4 only** — the tunnel doesn't carry IPv6. To stop dual-stack apps leaking out over v6, **IPv6 is
+  blocked by default** while TUN is up (`tun ipv6 block|allow`, Config tab **TUN block IPv6**): global v6
+  fast-fails so apps fall back to the tunneled v4 (link-local/ULA left alone). macOS turns v6 off on the
+  uplink service and restores it on down; Linux adds an `unreachable 2000::/3` route.
 - Sanity-check the device layer on your box *without* touching routing: `sudo go -C app run ./cmd/tunprobe`.
 - Tunables (state file / Config tab): `tun_name`, `tun_addr`, `tun_mtu`, `tun_dns`.
 

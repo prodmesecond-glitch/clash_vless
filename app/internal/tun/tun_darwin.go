@@ -110,10 +110,24 @@ func (m *Manager) osUp(cfg Config) error {
 		m.logf("tun: LAN bypass on — private ranges kept off-tun (local-only resources reachable)")
 	}
 
+	// Block IPv6: the tunnel is IPv4-only, so a dual-stack app would happy-eyeballs
+	// out over v6 and leak the real address. Turn v6 off on the uplink service so
+	// everything falls back to the tunneled v4. (setv6off is reliable across macOS
+	// versions; a reject inet6 route's syntax is not.)
+	if cfg.BlockIPv6 {
+		if svc := primaryService(m.origDev); svc != "" {
+			m.v6Service = svc
+			m.runSoft("networksetup", "-setv6off", svc)
+			m.logf("tun: IPv6 blocked on %q — no v6 leak past the IPv4-only tunnel", svc)
+		} else {
+			m.logf("tun: IPv6 block requested but no primary service found for %s; v6 may leak", m.origDev)
+		}
+	}
+
 	if cfg.DNS != "" {
 		m.setDNS(cfg.DNS)
 	}
-	m.logf("tun: up — default routed through %s (IPv6 is not tunneled)", cfg.Name)
+	m.logf("tun: up — default routed through %s (IPv6 blocked)", cfg.Name)
 	return nil
 }
 
@@ -126,6 +140,10 @@ func (m *Manager) osDown() error {
 		}
 	}
 	m.reconcileBypass(nil)
+	if m.v6Service != "" {
+		m.runSoft("networksetup", "-setv6automatic", m.v6Service)
+		m.v6Service = ""
+	}
 	m.restoreDNS()
 	m.logf("tun: down — routing and DNS restored")
 	return nil

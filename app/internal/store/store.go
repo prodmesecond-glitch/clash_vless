@@ -100,6 +100,11 @@ type State struct {
 	// (like Throne's route_exclude_address) so corp intranet / printers / NAS stay
 	// reachable. true = capture them too (full tunnel, LAN unreachable via the exit).
 	TunTunnelLAN bool `json:"tun_tunnel_lan"`
+	// TunAllowIPv6 lets IPv6 escape while TUN is up. Default false = IPv6 block ON:
+	// the tunnel is IPv4-only, so on a dual-stack network apps would happy-eyeballs
+	// straight out over v6 and leak the real address (bypassing the exit). Blocking
+	// global-unicast v6 forces fallback to the tunneled v4. true = leave v6 alone.
+	TunAllowIPv6 bool `json:"tun_allow_ipv6"`
 
 	// legacy fields, migrated into Subs / Mains on load.
 	LegacyURL       string    `json:"subscription_url,omitempty"`
@@ -115,7 +120,7 @@ type State struct {
 const DefaultUA = "Happ/3.13.0"
 
 // Version is the app version, shown in the TUI header and `version` command.
-const Version = "0.13.0"
+const Version = "0.14.0"
 
 func Dir() (string, error) {
 	base, err := os.UserConfigDir()
@@ -301,6 +306,10 @@ func (s *State) TunStaticResolver() string {
 // TunBypassLAN reports whether private/LAN ranges are kept off the tunnel
 // (default true). Inverse of TunTunnelLAN so the zero value bypasses.
 func (s *State) TunBypassLAN() bool { return !s.TunTunnelLAN }
+
+// TunBlockIPv6 reports whether global-unicast IPv6 is blocked while TUN is up
+// (default true). Inverse of TunAllowIPv6 so the zero value blocks the v6 leak.
+func (s *State) TunBlockIPv6() bool { return !s.TunAllowIPv6 }
 
 // EntryListenPort is the local SOCKS port the current first hop (entry node) is
 // exposed on while a chained tier (T2/T3) is active. Config 0 = auto (ListenPort+1).

@@ -167,6 +167,7 @@ func run(args []string) error {
 		fmt.Println("  tun [on|off|status]   system-wide TUN capture (Linux/Windows; daemon must be root/admin)")
 		fmt.Println("  tun dns real-net|static|<ip>|auto   DNS mode (real-net = your LAN resolver off-tun · static routed = via the exit) / set the static resolver")
 		fmt.Println("  tun lan bypass|tunnel   keep private/LAN ranges off the tunnel (default, local-only reachable) or capture them")
+		fmt.Println("  tun ipv6 block|allow    block global IPv6 (default — no v6 leak past the IPv4-only tunnel) or let it escape")
 		fmt.Println("  list             show active nodes (two pools)")
 		fmt.Println("  gen [entry]      print the xray config for main, optionally chained via a cached node")
 		fmt.Println("  up [entry]       start xray in-process (chained via [entry] also exposes hop-1 on its own port)")
@@ -555,6 +556,23 @@ func cmdTun(st *store.State, args []string) error {
 		default:
 			return fmt.Errorf("usage: clashvless tun lan bypass|tunnel")
 		}
+	case "ipv6", "ip6", "v6":
+		// tun ipv6 block|allow — block global-unicast IPv6 (default) or let it escape
+		if len(args) < 2 {
+			fmt.Printf("TUN IPv6: %s\n", tunIPv6Label(st.TunBlockIPv6()))
+			fmt.Println("usage: clashvless tun ipv6 block | allow")
+			return nil
+		}
+		switch v := strings.ToLower(strings.TrimSpace(args[1])); v {
+		case "block", "off", "on", "no":
+			fmt.Println("TUN IPv6 → BLOCK (global v6 fast-fails so apps fall back to the tunneled v4 — no leak)")
+			return apply(map[string]any{"tun_allow_ipv6": false}, func(s *store.State) { s.TunAllowIPv6 = false })
+		case "allow", "on-net", "leak", "yes":
+			fmt.Println("TUN IPv6 → ALLOW (v6 escapes on the real network — the IPv4-only tunnel does NOT cover it)")
+			return apply(map[string]any{"tun_allow_ipv6": true}, func(s *store.State) { s.TunAllowIPv6 = true })
+		default:
+			return fmt.Errorf("usage: clashvless tun ipv6 block|allow")
+		}
 	case "status", "":
 		name := st.TunName
 		if name == "" {
@@ -565,10 +583,19 @@ func cmdTun(st *store.State, args []string) error {
 		fmt.Printf("  device %s   addr %s   mtu %d\n", name, st.TunAddress(), st.TunMTUOr())
 		fmt.Printf("  dns %s\n", tunDNSDisplay(st))
 		fmt.Printf("  lan %s\n", tunLANLabel(st.TunBypassLAN()))
+		fmt.Printf("  ipv6 %s\n", tunIPv6Label(st.TunBlockIPv6()))
 		return nil
 	default:
-		return fmt.Errorf("usage: clashvless tun [on|off|status|dns real-net|static|<ip>|auto|lan bypass|tunnel]")
+		return fmt.Errorf("usage: clashvless tun [on|off|status|dns real-net|static|<ip>|auto|lan bypass|tunnel|ipv6 block|allow]")
 	}
+}
+
+// tunIPv6Label describes whether global-unicast IPv6 is blocked while TUN is up.
+func tunIPv6Label(block bool) string {
+	if block {
+		return "block (global v6 fast-fails → apps fall back to the tunneled v4; no leak)"
+	}
+	return "allow (v6 escapes on the real network — NOT covered by the IPv4-only tunnel)"
 }
 
 // tunLANLabel describes whether private/LAN ranges bypass the tunnel.

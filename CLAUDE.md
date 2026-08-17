@@ -96,7 +96,16 @@ For **TUN mode** the daemon must be elevated: `sudo clashvless run` (then attach
       `resolvectl` fallback for the systemd stub; Linux/macOS only), because a public default like `8.8.8.8` is
       often firewalled on a corporate LAN and a LAN resolver is unreachable through the exit.
 
-    IPv4 only (IPv6 isn't tunneled → disable it if leaks matter). Needs root/admin.
+    IPv4 only (IPv6 isn't tunneled) — see IPv6 block. Needs root/admin.
+  - **IPv6 block** (`store.TunBlockIPv6()`, default **on**; `TunAllowIPv6`=false; toggle `tun ipv6 block|allow`,
+    Config-tab **TUN block IPv6**): the tunnel is IPv4-only, so on a dual-stack network an app happy-eyeballs
+    straight out over v6 and **leaks the real address** past the exit (the `curl ifconfig.me → 2a03:…` symptom).
+    Blocking global-unicast v6 (`tun.IPv6BlockRange` = `2000::/3`) makes the v6 connect **fast-fail** so apps
+    fall back to the tunneled v4; link-local (`fe80::/10`) and ULA (`fc00::/7`) are left alone. Mechanism differs
+    per OS (like the fwmark-vs-route bypass split): **Linux** adds `ip -6 route add unreachable 2000::/3`;
+    **macOS** runs `networksetup -setv6off <uplink service>` (reliable across versions; the reject-inet6-route
+    syntax isn't) and restores `-setv6automatic` on `osDown`; **Windows** routes the range into the tun
+    (best-effort, untested). `tun allow` leaves v6 alone.
   - **LAN bypass** (`store.TunBypassLAN()`, default **on**; `TunTunnelLAN`=false; toggle `tun lan bypass|tunnel`,
     Config-tab **TUN LAN bypass**): keeps private/local ranges **off the tunnel** so LAN-only resources (corp
     intranet, printers, NAS, a router UI) stay reachable — without it the whole default route goes to the exit,
