@@ -31,6 +31,9 @@ func FwMark() int32 { return 0 }
 // UplinkDevice is unused off Linux (bypass is by explicit per-server routes).
 func UplinkDevice() string { return "" }
 
+// RemoveDevice is a no-op off Linux (utun devices are kernel-managed).
+func RemoveDevice(string) {}
+
 // SystemResolver returns the resolver the host used before TUN (first
 // non-loopback IPv4 nameserver in /etc/resolv.conf, which macOS keeps in sync
 // with the primary service). DIRECT-mode DNS adopts it so queries keep working
@@ -95,6 +98,18 @@ func (m *Manager) osUp(cfg Config) error {
 		return err
 	}
 
+	// LAN bypass: keep private/link-local/multicast ranges on the real network
+	// (like Throne's route_exclude_address) so local-only resources stay reachable.
+	if cfg.BypassLAN {
+		for _, c := range LANBypassRanges.ViaGateway {
+			m.runSoft("route", "-n", "add", "-net", c, gw)
+		}
+		for _, c := range LANBypassRanges.OnLink {
+			m.runSoft("route", "-n", "add", "-net", c, "-interface", dev)
+		}
+		m.logf("tun: LAN bypass on — private ranges kept off-tun (local-only resources reachable)")
+	}
+
 	if cfg.DNS != "" {
 		m.setDNS(cfg.DNS)
 	}
@@ -105,6 +120,11 @@ func (m *Manager) osUp(cfg Config) error {
 func (m *Manager) osDown() error {
 	m.runSoft("route", "-n", "delete", "-net", "0.0.0.0/1")
 	m.runSoft("route", "-n", "delete", "-net", "128.0.0.0/1")
+	if m.cfg.BypassLAN {
+		for _, c := range append(append([]string{}, LANBypassRanges.ViaGateway...), LANBypassRanges.OnLink...) {
+			m.runSoft("route", "-n", "delete", "-net", c)
+		}
+	}
 	m.reconcileBypass(nil)
 	m.restoreDNS()
 	m.logf("tun: down — routing and DNS restored")

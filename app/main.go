@@ -166,6 +166,7 @@ func run(args []string) error {
 		fmt.Println("  loglevel [none|error|warning|info|debug]  xray log verbosity")
 		fmt.Println("  tun [on|off|status]   system-wide TUN capture (Linux/Windows; daemon must be root/admin)")
 		fmt.Println("  tun dns real-net|static|<ip>|auto   DNS mode (real-net = your LAN resolver off-tun · static routed = via the exit) / set the static resolver")
+		fmt.Println("  tun lan bypass|tunnel   keep private/LAN ranges off the tunnel (default, local-only reachable) or capture them")
 		fmt.Println("  list             show active nodes (two pools)")
 		fmt.Println("  gen [entry]      print the xray config for main, optionally chained via a cached node")
 		fmt.Println("  up [entry]       start xray in-process (chained via [entry] also exposes hop-1 on its own port)")
@@ -537,6 +538,23 @@ func cmdTun(st *store.State, args []string) error {
 			fmt.Printf("TUN static-routed resolver → %s\n", v)
 			return apply(map[string]any{"tun_static_dns": v}, func(s *store.State) { s.TunStaticDNS = v })
 		}
+	case "lan":
+		// tun lan bypass|tunnel — keep private/LAN ranges off the tunnel (default) or capture them
+		if len(args) < 2 {
+			fmt.Printf("TUN LAN: %s\n", tunLANLabel(st.TunBypassLAN()))
+			fmt.Println("usage: clashvless tun lan bypass | tunnel")
+			return nil
+		}
+		switch v := strings.ToLower(strings.TrimSpace(args[1])); v {
+		case "bypass", "direct", "off-tun", "on":
+			fmt.Println("TUN LAN → BYPASS (private/LAN ranges kept off-tun — local-only resources reachable)")
+			return apply(map[string]any{"tun_tunnel_lan": false}, func(s *store.State) { s.TunTunnelLAN = false })
+		case "tunnel", "capture", "through", "off":
+			fmt.Println("TUN LAN → TUNNEL (private ranges routed through the exit too — LAN unreachable via it)")
+			return apply(map[string]any{"tun_tunnel_lan": true}, func(s *store.State) { s.TunTunnelLAN = true })
+		default:
+			return fmt.Errorf("usage: clashvless tun lan bypass|tunnel")
+		}
 	case "status", "":
 		name := st.TunName
 		if name == "" {
@@ -546,10 +564,19 @@ func cmdTun(st *store.State, args []string) error {
 		fmt.Printf("  os support: %v   this process privileged: %v\n", tun.Supported(), tun.Privileged())
 		fmt.Printf("  device %s   addr %s   mtu %d\n", name, st.TunAddress(), st.TunMTUOr())
 		fmt.Printf("  dns %s\n", tunDNSDisplay(st))
+		fmt.Printf("  lan %s\n", tunLANLabel(st.TunBypassLAN()))
 		return nil
 	default:
-		return fmt.Errorf("usage: clashvless tun [on|off|status|dns real-net|static|<ip>|auto]")
+		return fmt.Errorf("usage: clashvless tun [on|off|status|dns real-net|static|<ip>|auto|lan bypass|tunnel]")
 	}
+}
+
+// tunLANLabel describes whether private/LAN ranges bypass the tunnel.
+func tunLANLabel(bypass bool) string {
+	if bypass {
+		return "bypass (private/LAN kept off-tun — local-only reachable)"
+	}
+	return "tunnel (private ranges captured — LAN unreachable via exit)"
 }
 
 // tunDNSDisplay is the DNS mode + effective resolver, for `tun status` and

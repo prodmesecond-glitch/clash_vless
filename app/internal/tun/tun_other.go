@@ -22,6 +22,9 @@ func UplinkDevice() string { return "" }
 // SystemResolver is unused on unsupported OSes.
 func SystemResolver() string { return "" }
 
+// RemoveDevice is unused on unsupported OSes.
+func RemoveDevice(string) {}
+
 func (m *Manager) osUp(cfg Config) error {
 	return errors.New("TUN mode is only supported on Linux, Windows, and macOS")
 }

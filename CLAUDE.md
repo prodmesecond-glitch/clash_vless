@@ -97,6 +97,15 @@ For **TUN mode** the daemon must be elevated: `sudo clashvless run` (then attach
       often firewalled on a corporate LAN and a LAN resolver is unreachable through the exit.
 
     IPv4 only (IPv6 isn't tunneled → disable it if leaks matter). Needs root/admin.
+  - **LAN bypass** (`store.TunBypassLAN()`, default **on**; `TunTunnelLAN`=false; toggle `tun lan bypass|tunnel`,
+    Config-tab **TUN LAN bypass**): keeps private/local ranges **off the tunnel** so LAN-only resources (corp
+    intranet, printers, NAS, a router UI) stay reachable — without it the whole default route goes to the exit,
+    which can't reach anything behind your gateway. This is our equivalent of **Throne**'s sing-tun
+    `route_exclude_address`; since we install our own OS routes, `osUp` instead punches the ranges back out to
+    the real gateway (more specific than the `0/1`+`128/1` halves): `tun.LANBypassRanges` = RFC1918
+    (`10/8`,`172.16/12`,`192.168/16`) via the gateway + link-local (`169.254/16`) and multicast (`224/4`)
+    on-link. Loopback/broadcast need no route (the kernel's `local` table already keeps them off-tun). `osDown`
+    removes them. Set `tun lan tunnel` to capture private ranges too (full tunnel).
   Linux and macOS
   are tested and working; **Windows is code-complete but author-untested** (needs `wintun.dll` beside the
   exe). macOS uses a kernel-named `utunN` device and per-service DNS.

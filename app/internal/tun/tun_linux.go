@@ -36,6 +36,15 @@ func FwMark() int32 { return 0x1a2b }
 // packets would otherwise loop back into the tun. "" if undeterminable.
 func UplinkDevice() string { _, dev, _ := defaultRoute(); return dev }
 
+// RemoveDevice deletes a leftover TUN device by name (idempotent) so a fresh
+// bring-up isn't blocked by "device or resource busy" when the kernel is still
+// releasing the old one after a quick off→on. No-op if the device is absent.
+func RemoveDevice(name string) {
+	if name != "" {
+		_ = exec.Command("ip", "link", "del", name).Run()
+	}
+}
+
 // SystemResolver returns the resolver the host used before TUN (the first
 // non-loopback IPv4 nameserver in /etc/resolv.conf). This is what DIRECT-mode
 // DNS adopts so queries keep working on the real network — no public default,
@@ -125,6 +134,19 @@ func (m *Manager) osUp(cfg Config) error {
 		return err
 	}
 
+	// LAN bypass: punch the private/link-local/multicast ranges back out to the
+	// real network (more specific than the /1 halves win), so local-only resources
+	// stay reachable. Our equivalent of Throne's sing-tun route_exclude_address.
+	if cfg.BypassLAN {
+		for _, c := range LANBypassRanges.ViaGateway {
+			m.runSoft("ip", "route", "add", c, "via", gw, "dev", dev)
+		}
+		for _, c := range LANBypassRanges.OnLink {
+			m.runSoft("ip", "route", "add", c, "dev", dev, "scope", "link")
+		}
+		m.logf("tun: LAN bypass on — private ranges kept off-tun (local-only resources reachable)")
+	}
+
 	if cfg.DNS != "" {
 		if cfg.DNSDirect {
 			// Pin the resolver off the tunnel (its own /32 out the real uplink) so
@@ -143,6 +165,14 @@ func (m *Manager) osDown() error {
 	name := m.cfg.Name
 	m.runSoft("ip", "route", "del", "0.0.0.0/1", "dev", name)
 	m.runSoft("ip", "route", "del", "128.0.0.0/1", "dev", name)
+	if m.cfg.BypassLAN {
+		for _, c := range LANBypassRanges.ViaGateway {
+			m.runSoft("ip", "route", "del", c, "via", m.origGW, "dev", m.origDev)
+		}
+		for _, c := range LANBypassRanges.OnLink {
+			m.runSoft("ip", "route", "del", c, "dev", m.origDev, "scope", "link")
+		}
+	}
 	mark := strconv.Itoa(int(m.cfg.Mark))
 	m.runSoft("ip", "rule", "del", "fwmark", mark, "table", fwTable)
 	m.runSoft("ip", "route", "flush", "table", fwTable)

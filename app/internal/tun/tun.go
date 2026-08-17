@@ -26,6 +26,19 @@ type Config struct {
 	DNSDirect bool     // reach DNS off-tun (bypass route) instead of through the tunnel
 	Mark      int32    // SO_MARK xray stamps on its sockets; Linux steers marked traffic off-tun (0 = none)
 	ServerIPs []net.IP // Windows/macOS: server IPs to route direct (Linux uses Mark instead)
+	BypassLAN bool     // keep private/LAN ranges (LANBypassRanges) off the tunnel so local-only resources stay reachable
+}
+
+// LANBypassRanges are the private/local IPv4 CIDRs kept OFF the tunnel when
+// Config.BypassLAN is set, so LAN-only resources (corp intranet, printers, NAS,
+// a router UI) stay reachable. Matches Throne's sing-tun route_exclude_address
+// set (RFC1918 + link-local + multicast); loopback/broadcast need no route (the
+// kernel's local table already keeps them off-tun). link-local and multicast are
+// on-link (no gateway), so callers route them link-scoped; the rest via the
+// original gateway.
+var LANBypassRanges = struct{ ViaGateway, OnLink []string }{
+	ViaGateway: []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"},
+	OnLink:     []string{"169.254.0.0/16", "224.0.0.0/4"},
 }
 
 // Manager owns one TUN bring-up and restores the OS on Down. Methods are

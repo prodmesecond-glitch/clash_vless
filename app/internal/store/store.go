@@ -95,6 +95,11 @@ type State struct {
 	// the exit to TunStaticDNS (no leak). See tun.ResolverFor.
 	TunDNSDirect bool   `json:"tun_dns_direct"`
 	TunStaticDNS string `json:"tun_static_dns"` // resolver for "static routed" mode ("" = 8.8.8.8)
+	// TunTunnelLAN routes private/LAN ranges THROUGH the tunnel. Default false =
+	// LAN bypass ON: RFC1918 + link-local + multicast are kept on the real network
+	// (like Throne's route_exclude_address) so corp intranet / printers / NAS stay
+	// reachable. true = capture them too (full tunnel, LAN unreachable via the exit).
+	TunTunnelLAN bool `json:"tun_tunnel_lan"`
 
 	// legacy fields, migrated into Subs / Mains on load.
 	LegacyURL       string    `json:"subscription_url,omitempty"`
@@ -110,7 +115,7 @@ type State struct {
 const DefaultUA = "Happ/3.13.0"
 
 // Version is the app version, shown in the TUI header and `version` command.
-const Version = "0.12.3"
+const Version = "0.13.0"
 
 func Dir() (string, error) {
 	base, err := os.UserConfigDir()
@@ -292,6 +297,10 @@ func (s *State) TunStaticResolver() string {
 	}
 	return "8.8.8.8"
 }
+
+// TunBypassLAN reports whether private/LAN ranges are kept off the tunnel
+// (default true). Inverse of TunTunnelLAN so the zero value bypasses.
+func (s *State) TunBypassLAN() bool { return !s.TunTunnelLAN }
 
 // EntryListenPort is the local SOCKS port the current first hop (entry node) is
 // exposed on while a chained tier (T2/T3) is active. Config 0 = auto (ListenPort+1).

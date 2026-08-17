@@ -88,6 +88,7 @@ clashvless main add '<vless://…>'         # add a final exit (plain hops freel
 | `run` | headless failover engine |
 | `tun [on\|off\|status]` | system-wide TUN capture (needs a root/admin daemon — see below) |
 | `tun dns real-net\|static` · `tun dns <ip>\|auto` | DNS mode (resolve on your LAN vs via the exit) · set/reset the static resolver |
+| `tun lan bypass\|tunnel` | keep private/LAN ranges off the tunnel (default) or route them through the exit |
 | `tui` | the dashboard (default with no args) |
 | `whoami` | show this device's panel identity |
 
@@ -124,6 +125,13 @@ set up per the mode below. The exit's own domain resolves locally, so bootstrap 
   resolving those names needs a tunnel that isn't up yet. real-net **auto-adopts the resolver you were
   already using before TUN** (from `/etc/resolv.conf`), so it just works on networks that firewall public
   resolvers like `8.8.8.8` or hand out a private LAN resolver. Trades DNS privacy for bootstrapping.
+
+**LAN bypass** (on by default — the **TUN LAN bypass** toggle, or `clashvless tun lan bypass|tunnel`).
+Private/local ranges (`10/8`, `172.16/12`, `192.168/16`, link-local, multicast) are kept **off** the tunnel
+so machines reachable **only on your network** — a corp intranet, a NAS, a printer, your router's admin page —
+stay reachable. Without it the whole default route goes to the exit, which can't reach anything behind your
+gateway (this is the same thing Throne does with sing-box `route_exclude_address`). Set `tun lan tunnel` to
+route private ranges through the exit too.
 
 **Notes / limits**
 - **`ping` doesn't traverse the tunnel** — xray's TUN forwards **TCP and UDP only, not ICMP**. So

@@ -797,6 +797,7 @@ func (s *Supervisor) tunUp() error {
 	ips, hosts := s.tunResolveAll()
 	mark := tun.FwMark()
 	dev := tun.UplinkDevice()
+	bypassLAN := s.cfgBool(func(st *store.State) bool { return st.TunBypassLAN() })
 
 	// DNS-direct: reach the resolver off-tun. Linux pins a /32 (see osUp); on
 	// Windows/macOS fold the resolver IP into the per-server bypass list.
@@ -818,13 +819,17 @@ func (s *Supervisor) tunUp() error {
 		xray.SetTunMode(0, "", nil)
 		return fmt.Errorf("build bridge config: %w", err)
 	}
+	// Clear any leftover device with this name (from a crash, or the kernel still
+	// releasing it after a quick off→on) so xray can recreate it instead of
+	// failing with "device or resource busy".
+	tun.RemoveDevice(name)
 	inst, err := Start(cfg)
 	if err != nil {
 		xray.SetTunMode(0, "", nil)
 		return fmt.Errorf("start bridge instance (Windows needs wintun.dll next to the exe): %w", err)
 	}
 
-	if err := s.tunMgr.Up(tun.Config{Name: name, Addr: addr, MTU: mtu, DNS: dns, DNSDirect: dnsDirect, Mark: mark, ServerIPs: ips}); err != nil {
+	if err := s.tunMgr.Up(tun.Config{Name: name, Addr: addr, MTU: mtu, DNS: dns, DNSDirect: dnsDirect, Mark: mark, ServerIPs: ips, BypassLAN: bypassLAN}); err != nil {
 		_ = inst.Close()
 		xray.SetTunMode(0, "", nil)
 		return err

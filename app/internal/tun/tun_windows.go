@@ -35,6 +35,9 @@ func UplinkDevice() string { return "" }
 // explicitly with `tun dns <ip>`. Returns "".
 func SystemResolver() string { return "" }
 
+// RemoveDevice is a no-op off Linux (wintun adapters are managed by xray).
+func RemoveDevice(string) {}
+
 // Privileged reports whether the process is running elevated (Administrators).
 func Privileged() bool {
 	var sid *windows.SID
@@ -106,6 +109,18 @@ func (m *Manager) osUp(cfg Config) error {
 		return err
 	}
 
+	// LAN bypass: keep private/link-local/multicast ranges on the real network via
+	// the gateway (like Throne's route_exclude_address) so local-only resources
+	// stay reachable.
+	if cfg.BypassLAN {
+		for _, c := range append(append([]string{}, LANBypassRanges.ViaGateway...), LANBypassRanges.OnLink...) {
+			if netIP, mask, err := cidrIPMask(c); err == nil {
+				m.runSoft("route", "add", netIP, "mask", mask, m.origGW, "metric", "1")
+			}
+		}
+		m.logf("tun: LAN bypass on — private ranges kept off-tun (local-only resources reachable)")
+	}
+
 	if cfg.DNS != "" {
 		m.runSoft("netsh", "interface", "ip", "set", "dns", "name="+cfg.Name, "static", cfg.DNS)
 	}
@@ -116,6 +131,13 @@ func (m *Manager) osUp(cfg Config) error {
 func (m *Manager) osDown() error {
 	m.runSoft("route", "delete", "0.0.0.0", "mask", "128.0.0.0")
 	m.runSoft("route", "delete", "128.0.0.0", "mask", "128.0.0.0")
+	if m.cfg.BypassLAN {
+		for _, c := range append(append([]string{}, LANBypassRanges.ViaGateway...), LANBypassRanges.OnLink...) {
+			if netIP, _, err := cidrIPMask(c); err == nil {
+				m.runSoft("route", "delete", netIP)
+			}
+		}
+	}
 	m.reconcileBypass(nil)
 	if m.cfg.DNS != "" {
 		m.runSoft("netsh", "interface", "ip", "set", "dns", "name="+m.cfg.Name, "dhcp")
