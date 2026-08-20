@@ -7,8 +7,11 @@ import (
 	"net"
 	"net/url"
 	"sort"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/xtls/xray-core/core"
 
 	"clashvless/internal/store"
 	"clashvless/internal/tun"
@@ -74,10 +77,12 @@ type Supervisor struct {
 
 	// TUN mode (touched only from the single Run goroutine). The bridge is a
 	// persistent tun→local-SOCKS instance so failover never churns the device.
-	bridge *Instance
-	tunMgr *tun.Manager
-	tunOn  bool
-	tunErr bool // last bring-up failed; don't respin until toggled off
+	bridge   *Instance
+	tunMgr   *tun.Manager
+	tunOn    bool
+	tunErr   bool              // last bring-up failed; don't respin until toggled off
+	tunMark  int32             // xray's off-tun socket mark (cached for the gateway-change re-point)
+	tunHosts map[string]string // exit domain→IP map (cached so the re-point needs no DNS)
 }
 
 type plan struct {
@@ -760,6 +765,48 @@ func (s *Supervisor) syncTun(ctx context.Context) {
 		}
 	case !want && (s.tunOn || s.tunErr):
 		s.tunDown()
+	case want && s.tunOn:
+		// Already up: re-assert the OS routing each tick. A network event (DHCP
+		// renew, Wi-Fi bounce, sleep/wake) can wipe the default-capture halves
+		// out from under us — the tun device stays up but traffic silently leaks
+		// straight out the real uplink. This reinstalls them if they went missing.
+		s.tunReassert()
+	}
+}
+
+// tunReassert keeps TUN routing correct against network events while it's up, so
+// the tunnel doesn't silently become a no-op. Runs each cycle; logs only when it
+// actually acts. Two failure modes, cheapest first:
+//   - uplink moved to a NEW network (gateway/dev changed): the bypass routes,
+//     DNS, and xray's own egress binding all point at the dead uplink, so a
+//     routes-only fix won't do — re-up fully (rebuilds them + rebinds the live
+//     exit against the new uplink, exactly like an off→on toggle).
+//   - same network, but the default-capture halves got wiped (DHCP renew, Wi-Fi
+//     bounce, sleep/wake): just re-install them in place.
+func (s *Supervisor) tunReassert() {
+	if changed, desc := s.tunMgr.GatewayChanged(); changed {
+		s.logf("TUN: uplink changed to %s — re-pointing routes/egress in place (tunnel stays up)", desc)
+		if err := s.tunMgr.Reapply(); err != nil {
+			// Usually the new uplink isn't fully ready yet (no default route) —
+			// leave TUN up and retry next cycle rather than tearing anything down.
+			s.logf("TUN: re-point deferred: %v", err)
+			return
+		}
+		// Refresh xray's egress decoration for the new uplink dev (Linux
+		// SO_BINDTODEVICE; no-op on macOS) with the cached hosts — no DNS — then
+		// rebuild the live exit so it re-dials over the corrected path.
+		xray.SetTunMode(s.tunMark, tun.UplinkDevice(), s.tunHosts)
+		s.stopLive()
+		s.logf("TUN: re-pointed to the new uplink — exit reconnecting")
+		return
+	}
+	repaired, err := s.tunMgr.Reassert()
+	if err != nil {
+		s.logf("TUN: re-assert routes: %v", err)
+		return
+	}
+	if repaired {
+		s.logf("TUN: default-capture routes were missing (a network change wiped them) — reinstalled; traffic back on the tunnel")
 	}
 }
 
@@ -814,6 +861,7 @@ func (s *Supervisor) tunUp() error {
 	// ruleset stripping the fwmark (Docker/firewalld), where the marked packets
 	// would otherwise loop back into the tunnel and kill every probe.
 	xray.SetTunMode(mark, dev, hosts)
+	s.tunMark, s.tunHosts = mark, hosts // cached for the gateway-change re-point (no re-resolve)
 
 	cfg, err := xray.BuildTunBridge(s.mainPort, name, mtu, s.loglevel())
 	if err != nil {
@@ -824,7 +872,7 @@ func (s *Supervisor) tunUp() error {
 	// releasing it after a quick off→on) so xray can recreate it instead of
 	// failing with "device or resource busy".
 	tun.RemoveDevice(name)
-	inst, err := Start(cfg)
+	inst, err := s.startBridge(cfg, name)
 	if err != nil {
 		xray.SetTunMode(0, "", nil)
 		return fmt.Errorf("start bridge instance (Windows needs wintun.dll next to the exe): %w", err)
@@ -852,6 +900,34 @@ func (s *Supervisor) tunUp() error {
 	// pre-TUN sockets aren't marked and would loop. The next cycle re-applies.
 	s.stopLive()
 	return nil
+}
+
+// startBridge starts the bridge (TUN-owning) instance, retrying on a transient
+// "resource busy". After a quick off→on (a manual toggle, or the automatic re-up
+// on a network change) the OS may still be releasing the device from the closing
+// instance, so xray's attempt to (re)create it fails with "device or resource
+// busy". On Linux/Windows RemoveDevice clears a leftover; on macOS the utun is
+// kernel-managed and only the owner's close frees it, so we back off and retry
+// while the kernel catches up. A busy that never clears (another clashvless
+// daemon already owns the device) surfaces after the retries with a clear hint.
+func (s *Supervisor) startBridge(cfg []byte, name string) (*core.Instance, error) {
+	const attempts = 8
+	var err error
+	for i := 0; i < attempts; i++ {
+		var inst *core.Instance
+		if inst, err = Start(cfg); err == nil {
+			return inst, nil
+		}
+		if !strings.Contains(strings.ToLower(err.Error()), "busy") {
+			return nil, err // not the device race — fail fast
+		}
+		if i == 0 {
+			s.logf("TUN: device %s still releasing — retrying bridge start", name)
+		}
+		tun.RemoveDevice(name)
+		time.Sleep(350 * time.Millisecond)
+	}
+	return nil, fmt.Errorf("%w — is another clashvless daemon already running with TUN on? (device %s stayed busy)", err, name)
 }
 
 // tunDown restores the OS routing/DNS and stops the bridge instance. Idempotent.

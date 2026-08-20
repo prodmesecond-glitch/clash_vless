@@ -99,6 +99,61 @@ func (m *Manager) Up(cfg Config) error {
 	return nil
 }
 
+// Reassert re-installs any TUN routing a network event (DHCP renew, Wi-Fi
+// bounce, sleep/wake) may have wiped out from under us — chiefly the
+// default-capture halves, whose loss silently turns the tunnel into a no-op
+// while it still reports "up" (traffic then leaks straight out the real
+// uplink). It's a cheap idempotent check meant to run on the supervisor tick;
+// it returns repaired=true ONLY when it actually re-installed something, so the
+// caller logs the repair and stays silent on every healthy tick. No-op when not
+// up. Serialized against Up/Down by the same lock.
+func (m *Manager) Reassert() (repaired bool, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.up {
+		return false, nil
+	}
+	return m.osReassert()
+}
+
+// GatewayChanged reports whether the real uplink's default gateway/egress
+// device has moved since Up captured it — i.e. the machine joined a different
+// network (new Wi-Fi/LAN, tethering swap). We leave the real 0/0 default in
+// place (only the /1 halves override it), so the OS still reports the true
+// uplink even while TUN owns the default; comparing it to what Up saw detects
+// the change. On a gateway change the bypass routes, DNS, and xray's own egress
+// binding all point at the dead uplink, so the caller must do a full re-up (not
+// just re-assert the halves). Returns changed=false when it can't determine the
+// current default (mid-transition / no uplink) so the caller waits, not thrash.
+// No-op (false) when not up. `desc` is a human-readable old→new for logging.
+func (m *Manager) GatewayChanged() (changed bool, desc string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.up {
+		return false, ""
+	}
+	return m.osGatewayChanged()
+}
+
+// Reapply re-points the gateway-dependent OS routing at the CURRENT uplink after
+// GatewayChanged reports the machine joined a new network — the per-server bypass
+// routes, LAN bypass, and DNS-direct route all pointed at the old (now dead)
+// gateway, so they're torn down and reinstalled against the new one. It reuses
+// the cached server IPs from the original Up (the exit servers don't change), so
+// it needs NO DNS resolution — deliberately, since right after a network switch
+// DNS often isn't ready yet. The TUN device and bridge instance are left up
+// (no teardown → no "resource busy" race, no dropped tunnel); the capture halves
+// are re-asserted too. The caller should rebuild xray's egress decoration + live
+// exit afterward so it re-dials over the corrected path. No-op when not up.
+func (m *Manager) Reapply() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.up {
+		return nil
+	}
+	return m.osReapply()
+}
+
 // Down restores routes and DNS. Safe to call when not up.
 func (m *Manager) Down() error {
 	m.mu.Lock()

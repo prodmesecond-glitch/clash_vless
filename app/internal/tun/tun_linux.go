@@ -124,12 +124,14 @@ func (m *Manager) osUp(cfg Config) error {
 	}
 
 	// Override the default with two /1 routes through the tun (win by specificity;
-	// the real default stays for the marked table's via-gateway).
-	if err := m.run("ip", "route", "add", "0.0.0.0/1", "dev", cfg.Name); err != nil {
+	// the real default stays for the marked table's via-gateway). `replace` (not
+	// `add`) so a leftover half from a prior daemon that died without clean
+	// teardown — possibly pointing at a now-dead device — doesn't block bring-up.
+	if err := m.run("ip", "route", "replace", "0.0.0.0/1", "dev", cfg.Name); err != nil {
 		m.osDown()
 		return err
 	}
-	if err := m.run("ip", "route", "add", "128.0.0.0/1", "dev", cfg.Name); err != nil {
+	if err := m.run("ip", "route", "replace", "128.0.0.0/1", "dev", cfg.Name); err != nil {
 		m.osDown()
 		return err
 	}
@@ -166,7 +168,7 @@ func (m *Manager) osUp(cfg Config) error {
 		}
 		m.setDNS(cfg.DNS)
 	}
-	m.logf("tun: up — default routed through %s (IPv6 is not tunneled; disable it if leaks matter)", cfg.Name)
+	m.logf("tun: up — default routed through %s (IPv6 blocked)", cfg.Name)
 	return nil
 }
 
@@ -194,6 +196,104 @@ func (m *Manager) osDown() error {
 	m.restoreDNS()
 	m.logf("tun: down — routing and DNS restored")
 	return nil
+}
+
+// osReassert re-installs the default-capture halves if a network event wiped
+// them (the /1 routes vanish but the tun device stays up → a silent leak out the
+// real uplink). It checks whether traffic to a public address in each half still
+// egresses via our device; if not, it re-adds both halves. Returns true only
+// when it actually repaired the capture, so the caller logs just the repair.
+func (m *Manager) osReassert() (bool, error) {
+	if m.captureIntact() {
+		return false, nil
+	}
+	// replace so a stale/partial entry doesn't make `add` fail with "File exists"
+	m.runSoft("ip", "route", "del", "0.0.0.0/1", "dev", m.cfg.Name)
+	m.runSoft("ip", "route", "del", "128.0.0.0/1", "dev", m.cfg.Name)
+	if err := m.run("ip", "route", "add", "0.0.0.0/1", "dev", m.cfg.Name); err != nil {
+		return true, err
+	}
+	if err := m.run("ip", "route", "add", "128.0.0.0/1", "dev", m.cfg.Name); err != nil {
+		return true, err
+	}
+	return true, nil
+}
+
+// osGatewayChanged compares the current real default (gateway + egress device)
+// to what osUp captured; a difference means the uplink moved to a new network.
+func (m *Manager) osGatewayChanged() (bool, string) {
+	gw, dev, err := defaultRoute()
+	if err != nil || gw == "" {
+		return false, "" // mid-transition / no uplink — don't act
+	}
+	if gw == m.origGW && dev == m.origDev {
+		return false, ""
+	}
+	return true, fmt.Sprintf("%s dev %s (was %s dev %s)", gw, dev, m.origGW, m.origDev)
+}
+
+// osReapply re-points the gateway-dependent routes at the current uplink after a
+// network change: the fwmark table's default (which steers xray's own marked
+// sockets off-tun), the LAN bypass ranges, and the DNS-direct /32 all pointed at
+// the old gateway/device. No per-server bypass on Linux (that's the fwmark
+// table's job). Keeps the device up and re-asserts the capture halves. The
+// caller re-decorates xray (SO_BINDTODEVICE to the new dev) and rebuilds live.
+func (m *Manager) osReapply() error {
+	gw, dev, err := defaultRoute()
+	if err != nil || gw == "" {
+		return fmt.Errorf("no uplink yet")
+	}
+	if m.cfg.BypassLAN {
+		for _, c := range LANBypassRanges.ViaGateway {
+			m.runSoft("ip", "route", "del", c, "via", m.origGW, "dev", m.origDev)
+		}
+		for _, c := range LANBypassRanges.OnLink {
+			m.runSoft("ip", "route", "del", c, "dev", m.origDev, "scope", "link")
+		}
+	}
+	if m.cfg.DNSDirect && m.cfg.DNS != "" {
+		m.runSoft("ip", "route", "del", m.cfg.DNS+"/32", "via", m.origGW, "dev", m.origDev)
+	}
+	m.origGW, m.origDev = gw, dev
+	// re-point the fwmark table default (xray's off-tun path) at the new uplink
+	m.runSoft("ip", "route", "replace", "default", "via", gw, "dev", dev, "table", fwTable)
+	if m.cfg.BypassLAN {
+		for _, c := range LANBypassRanges.ViaGateway {
+			m.runSoft("ip", "route", "add", c, "via", gw, "dev", dev)
+		}
+		for _, c := range LANBypassRanges.OnLink {
+			m.runSoft("ip", "route", "add", c, "dev", dev, "scope", "link")
+		}
+	}
+	if m.cfg.DNSDirect && m.cfg.DNS != "" {
+		m.runSoft("ip", "route", "add", m.cfg.DNS+"/32", "via", gw, "dev", dev)
+	}
+	_, err = m.osReassert() // re-assert the capture halves if the transition dropped them
+	return err
+}
+
+// captureIntact reports whether the default-capture halves still steer traffic
+// into the tun — probes one public address in each /1 half and checks the kernel
+// would egress both via our device.
+func (m *Manager) captureIntact() bool {
+	return routeDev("1.1.1.1") == m.cfg.Name && routeDev("200.0.0.1") == m.cfg.Name
+}
+
+// routeDev returns the egress device the kernel would use for dst via
+// `ip route get`; "" on error.
+func routeDev(dst string) string {
+	out, err := exec.Command("ip", "route", "get", dst).Output()
+	if err != nil {
+		return ""
+	}
+	// "1.1.1.1 dev clashvless0 src ... " — take the token after "dev".
+	f := strings.Fields(string(out))
+	for i := 0; i+1 < len(f); i++ {
+		if f[i] == "dev" {
+			return f[i+1]
+		}
+	}
+	return ""
 }
 
 // defaultRoute returns the current IPv4 default gateway and egress device.

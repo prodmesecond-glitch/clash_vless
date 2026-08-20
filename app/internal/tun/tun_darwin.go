@@ -88,7 +88,12 @@ func (m *Manager) osUp(cfg Config) error {
 	m.bypass = map[string]bool{}
 	m.reconcileBypass(cfg.ServerIPs)
 
-	// Override the default with two /1 routes out the utun interface.
+	// Override the default with two /1 routes out the utun interface. Delete any
+	// leftover halves first (from a prior daemon that died without clean teardown —
+	// its stale /1 routes may point at a now-dead utun and would make `add` fail
+	// with "File exists", blocking bring-up).
+	m.runSoft("route", "-n", "delete", "-net", "0.0.0.0/1")
+	m.runSoft("route", "-n", "delete", "-net", "128.0.0.0/1")
 	if err := m.run("route", "-n", "add", "-net", "0.0.0.0/1", "-interface", cfg.Name); err != nil {
 		m.osDown()
 		return err
@@ -147,6 +152,101 @@ func (m *Manager) osDown() error {
 	m.restoreDNS()
 	m.logf("tun: down — routing and DNS restored")
 	return nil
+}
+
+// osReassert re-installs the default-capture halves if a network event wiped
+// them (the /1 routes vanish but the utun stays up → a silent leak straight out
+// the real uplink). It checks whether traffic to a public address in each half
+// still resolves onto our device; if not, it re-adds both halves. Returns true
+// only when it actually repaired the capture, so the caller logs just the repair.
+func (m *Manager) osReassert() (bool, error) {
+	if m.captureIntact() {
+		return false, nil
+	}
+	// delete first so a stale/partial entry doesn't make `add` fail with "File exists"
+	m.runSoft("route", "-n", "delete", "-net", "0.0.0.0/1")
+	m.runSoft("route", "-n", "delete", "-net", "128.0.0.0/1")
+	if err := m.run("route", "-n", "add", "-net", "0.0.0.0/1", "-interface", m.cfg.Name); err != nil {
+		return true, err
+	}
+	if err := m.run("route", "-n", "add", "-net", "128.0.0.0/1", "-interface", m.cfg.Name); err != nil {
+		return true, err
+	}
+	return true, nil
+}
+
+// osGatewayChanged compares the current real default (gateway + egress device)
+// to what osUp captured; a difference means the uplink moved to a new network.
+func (m *Manager) osGatewayChanged() (bool, string) {
+	gw, dev, err := defaultRoute()
+	if err != nil || gw == "" {
+		return false, "" // mid-transition / no uplink — don't act
+	}
+	if gw == m.origGW && dev == m.origDev {
+		return false, ""
+	}
+	return true, fmt.Sprintf("%s dev %s (was %s dev %s)", gw, dev, m.origGW, m.origDev)
+}
+
+// osReapply re-points the gateway-dependent routes at the current uplink after a
+// network change (bypass server IPs + LAN ranges all pointed at the dead
+// gateway). Reuses the cached cfg.ServerIPs (no DNS), keeps the device up, and
+// re-asserts the capture halves. The exit's own connection re-dials once the
+// caller rebuilds the live instance.
+func (m *Manager) osReapply() error {
+	gw, dev, err := defaultRoute()
+	if err != nil || gw == "" {
+		return fmt.Errorf("no uplink yet")
+	}
+	// tear down routes bound to the old gateway/device
+	if m.cfg.BypassLAN {
+		for _, c := range LANBypassRanges.ViaGateway {
+			m.runSoft("route", "-n", "delete", "-net", c)
+		}
+		for _, c := range LANBypassRanges.OnLink {
+			m.runSoft("route", "-n", "delete", "-net", c)
+		}
+	}
+	for s := range m.bypass { // per-server bypass points at the old gateway
+		m.delBypass(s)
+		delete(m.bypass, s)
+	}
+	// adopt the new uplink and reinstall against it
+	m.origGW, m.origDev = gw, dev
+	m.reconcileBypass(m.cfg.ServerIPs)
+	if m.cfg.BypassLAN {
+		for _, c := range LANBypassRanges.ViaGateway {
+			m.runSoft("route", "-n", "add", "-net", c, gw)
+		}
+		for _, c := range LANBypassRanges.OnLink {
+			m.runSoft("route", "-n", "add", "-net", c, "-interface", dev)
+		}
+	}
+	_, err = m.osReassert() // re-assert the capture halves if the transition dropped them
+	return err
+}
+
+// captureIntact reports whether the default-capture halves still steer traffic
+// into the tun — probes one public address in each /1 half (1.0.0.0/1 and
+// 128.0.0.0/1) and checks the kernel would egress both via our device.
+func (m *Manager) captureIntact() bool {
+	return routeDev("1.1.1.1") == m.cfg.Name && routeDev("200.0.0.1") == m.cfg.Name
+}
+
+// routeDev returns the egress interface the kernel would use for dst via
+// `route -n get`; "" on error.
+func routeDev(dst string) string {
+	out, err := exec.Command("route", "-n", "get", dst).Output()
+	if err != nil {
+		return ""
+	}
+	for _, ln := range strings.Split(string(out), "\n") {
+		f := strings.Fields(ln)
+		if len(f) >= 2 && f[0] == "interface:" {
+			return f[1]
+		}
+	}
+	return ""
 }
 
 // addBypass routes one server IP direct via the original gateway.

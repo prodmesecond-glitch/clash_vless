@@ -87,6 +87,30 @@ For **TUN mode** the daemon must be elevated: `sudo clashvless run` (then attach
   regardless. Main table stays clean (no per-server `/32`s). Windows/macOS lack both, so they bypass by
   explicit per-server routes instead (`tun.UplinkDevice()` returns `""` there). The exit's own domain
   resolves locally via injected `dns.hosts` (also from `SetTunMode`, needs `app/dns`) so bootstrap doesn't loop.
+  - **Route re-assert watchdog** (`tun.Manager.Reassert`/`osReassert`, `engine.syncTun`→`tunReassert`): a
+    network event (DHCP renew, Wi-Fi bounce, sleep/wake) can wipe the `0/1`+`128/1` capture halves out from
+    under us — the tun device stays up but the default falls back to the real uplink, so traffic **silently
+    leaks** while TUN still reports "on" (the `curl ifconfig.me → real IP with TUN on` symptom). Each
+    supervisor cycle (`interval_s`, default **12s**) `syncTun` re-checks capture via `captureIntact()`
+    (`route -n get`/`ip route get` a public IP in each half → must egress our device) and, if it went
+    missing, re-installs both halves and logs the repair (silent on healthy ticks, so no churn). Same check
+    on all three OSes (Windows parses `route print` for presence). Worst-case leak window = one tick; lower
+    `interval_s` to tighten it. Handles two modes, cheapest first: **(a) uplink moved to a new network** —
+    `GatewayChanged()`/`osGatewayChanged()` compares the current real default (we leave the `0/0` default on
+    the real uplink, so `route -n get default` still reports the true gateway even while the `/1` halves own
+    traffic) against what `osUp` captured; on a change it does an **in-place re-point** (`Reapply()`/
+    `osReapply`), NOT a full re-up: the per-server bypass (mac/win) / fwmark table (Linux), LAN bypass, and
+    DNS-direct route all pointed at the dead gateway, so they're torn down and reinstalled against the new
+    one **reusing the cached server IPs** (`tunUp` stashes `tunMark`+`tunHosts`) so it needs **no DNS** —
+    critical, since right after a Wi-Fi switch DNS isn't ready and a re-resolving re-up fails with `no such
+    host`. The device/bridge stay up (no teardown → no `resource busy`, no dropped tunnel); then the engine
+    re-decorates xray for the new uplink dev (`SetTunMode(tunMark, UplinkDevice(), tunHosts)` — Linux
+    `SO_BINDTODEVICE`, no-op on mac) and `stopLive()`s so the exit re-dials over the corrected path. If the
+    new uplink isn't ready yet (`Reapply` → "no uplink yet") it defers and retries next cycle, leaving TUN up.
+    **(b) same network, halves wiped** — just re-adds the halves in place. Both automatic; no manual toggle.
+    Bring-up itself is also race-hardened: `startBridge` retries on a transient "resource busy" (macOS utun
+    still releasing after a quick off→on), surfacing a clear "another daemon already running?" hint if it
+    never clears.
   - **DNS routing** (`tun.ResolverFor(realNet, staticDNS)` picks the resolver, chosen in `tunUp` **before**
     `osUp` rewrites `resolv.conf`): two named modes via **`TunDNSDirect`** (the Config-tab **TUN DNS** row shows
     `real-net` / `static routed`; CLI `tun dns real-net|static`):

@@ -137,6 +137,13 @@ route private ranges through the exit too.
 - **`ping` doesn't traverse the tunnel** — xray's TUN forwards **TCP and UDP only, not ICMP**. So
   `ping 8.8.8.8` shows 100% loss even when everything works; test with `curl ifconfig.me` (it should print
   your *exit's* IP) or just browse. This is normal for xray-tun / tun2socks, not a bug.
+- **Self-healing routes** — a network event (DHCP renew, Wi-Fi bounce, sleep/wake) can wipe the default
+  route off the tunnel, silently sending traffic back out your real uplink while TUN still shows "on". The
+  daemon re-checks every cycle (`interval_s`, default 12s) and heals itself within a tick: it reinstalls the
+  capture routes if they went missing, and if you've **switched networks** (new gateway — different Wi-Fi,
+  tethering) it re-points the bypass/DNS routes and the exit's egress at the new uplink **in place** (the
+  tunnel device stays up — no dropped connection, and no DNS needed, so it works even before the new
+  network's resolver is ready). No manual `tun off` / `tun on` needed. Each repair is logged.
 - xray's own connections — the live exit **and the failover probes** — are kept off the tunnel so egress
   testing keeps working: on **Linux** via `fwmark` policy routing **plus `SO_BINDTODEVICE`** onto the real
   uplink (the device bind survives firewalls — e.g. Docker/firewalld — that strip the packet mark, which
