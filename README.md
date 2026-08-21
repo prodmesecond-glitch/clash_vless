@@ -161,6 +161,38 @@ route private ranges through the exit too.
 - Sanity-check the device layer on your box *without* touching routing: `sudo go -C app run ./cmd/tunprobe`.
 - Tunables (state file / Config tab): `tun_name`, `tun_addr`, `tun_mtu`, `tun_dns`.
 
+### Coexisting with another VPN (reach a host behind it — SSH, etc.)
+
+TUN mode makes clashvless own the machine's **default route and DNS**. Bringing up a *second*
+whole-system VPN on top of it (Cisco AnyConnect / **openconnect**, WireGuard, …) makes the two fight
+over both: the other client repoints DNS at a resolver only it can reach and tries to grab the default
+route, and you get `Could not resolve host` plus `all tiers unreachable` while they trade blows —
+usually transient (it self-heals once the other client settles), but disruptive.
+
+If you only need that VPN to reach **specific hosts** — say one box on its private subnet, over SSH —
+don't run it system-wide at all. Run it as a **userspace proxy** so it makes **zero** routing/DNS
+changes and can't collide with TUN. For openconnect that's [`ocproxy`](https://github.com/cernekee/ocproxy)
+(a lwIP userspace stack — no `sudo`, no `utun`, no `route`/`resolv.conf` edits):
+
+```sh
+# 1. VPN as a local port-forward: localhost:2222 → 10.0.0.5:22 through the VPN (leave it running)
+openconnect -c ~/vpn/client.p12 --script-tun --script "ocproxy -L 2222:10.0.0.5:22" vpn.example.com
+
+# 2. SSH in — HostKeyAlias keeps known_hosts tied to the real host, not localhost:2222
+ssh -p 2222 -o HostKeyAlias=10.0.0.5 me@127.0.0.1
+```
+
+To reach *arbitrary* hosts behind the VPN, use a SOCKS listener instead of a fixed forward:
+
+```sh
+openconnect -c ~/vpn/client.p12 --script-tun --script "ocproxy -D 11080" vpn.example.com
+ssh -o ProxyCommand='nc -X 5 -x 127.0.0.1:11080 %h %p' me@10.0.0.5
+```
+
+- The other VPN's own control connection still egresses through your **clashvless exit** (it's just
+  outbound 443) — normally fine; only matters if that VPN pins/blocks your source IP.
+- `ping` won't work through ocproxy (TCP/UDP only) — test with the SSH/TCP connection itself.
+
 ## How failover works
 
 The topology is always: **local SOCKS inbound → `main` outbound** (the final exit).
