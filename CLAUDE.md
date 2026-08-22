@@ -7,11 +7,14 @@ or a **system-wide TUN** — with automatic tiered failover.
 ## Layout
 - `app/` — the Go module (`module clashvless`, Go 1.26). All source lives here.
   - `main.go` — CLI entrypoint + command dispatch.
-  - `internal/store` — on-disk state (subs, cached nodes, stable device identity, tunables).
+  - `internal/store` — on-disk state (subs, cached nodes, **slots** = per-port failover pools of mains,
+    stable device identity, tunables).
   - `internal/happ` — fetches a Remnawave sub (Happ 3.x mimic; optional SOCKS5 fetch proxy); parses
     base64 / URI-list / xray-JSON, building a `vless://` outbound for URI-list nodes so they're usable.
   - `internal/xray` — `vless://` → xray outbound, and full-config assembly (incl. entry→main chaining).
-  - `internal/engine` — embeds xray-core in-process; the failover supervisor + real-egress pool probe.
+  - `internal/engine` — embeds xray-core in-process. `Supervisor` is now a **manager** of one
+    `slotRunner` per enabled slot (each = a failover pool on its own port) + the **shared** real-egress
+    pool probe, speed loop, and TUN bridge; `publish()` aggregates every runner's `SlotStatus` into `Status`.
   - `internal/control` — daemon↔client IPC over a Unix socket: `run` serves it; `tui`/`status` attach.
     An **elevated daemon** (`sudo … run`, needed for TUN) hands the control socket **and** the state file
     back to the invoking user via `store.ReownToInvoker` (chown to `$SUDO_UID/$SUDO_GID`), so a **rootless
@@ -19,8 +22,10 @@ or a **system-wide TUN** — with automatic tiered failover.
     socket it only got `EACCES` on (that used to clobber a live root daemon) — it errors with guidance.
   - `internal/tui` — Bubble Tea dashboard client (Status / Subs / Main / Log / Config); `wizard.go`
     is the first-run setup wizard (sub → proxy → HWID → fetch → review → exit, with a non-plain warning).
-    Mains & sub nodes show a proto tag (`store.ProtoTag`/`OutboundProtoTag`: plain·reality·vision·grpc·ws·tls·xhttp).
-    The Config tab has a **TUN mode** toggle.
+    The **Main** tab is now a **slots** view: each slot shows its port, on/off, TUN marker (◉) and live tier,
+    with its mains nested; keys `s` add slot · `a` add main · `p` port · `t` TUN slot · `e` enable · `w` w/o-hop
+    · `d` delete. Mains & sub nodes show a proto tag (`store.ProtoTag`/`OutboundProtoTag`:
+    plain·reality·vision·grpc·ws·tls·xhttp). The Config tab has a **TUN mode** toggle.
   - `internal/tun` — TUN mode OS layer (Linux `ip`/`resolvectl`, Windows `netsh`/`route`, macOS
     `route`/`networksetup`; stub on other OSes). Moves the default route onto the device and keeps **xray's
     own sockets off the tunnel** so the live exit AND the failover probes reach servers directly — on Linux
@@ -53,33 +58,57 @@ go -C app build ./...                        # compile-check every package
 `run` starts the blocking daemon; `tui`/`status` attach to it as clients — but `tui` now **self-starts
 an in-process daemon** if none is running (stops when the TUI exits), so a fresh install needs no shell:
 `clashvless tui` → the setup wizard opens on the empty config. `run` no longer requires a main (idles DOWN).
-Key commands: `add <url>`, `fetch`, `fetch-proxy [host:port|off]`, `loglevel [level]`, `main add <vless://>`,
-`up [entry]`, `run`, `tun [on|off|status|dns <ip>|dns direct|dns tunnel|lan …|ipv6 …|icmp on|off]`, `whoami`. See the default-case
+Key commands: `add <url>`, `fetch`, `fetch-proxy [host:port|off]`, `loglevel [level]`, `main add <vless://> [slot]`,
+`slot [add|rm|port|tun|enable|disable …]`, `up [entry]`, `run`,
+`tun [on|off|status|dns <ip>|dns direct|dns tunnel|lan …|ipv6 …|icmp on|off]`, `whoami`. See the default-case
 help block in `main.go`.
 For **TUN mode** the daemon must be elevated: `sudo clashvless run` (then attach the TUI as a client).
 
 ## Architecture essentials
-- **Topology**: local SOCKS inbound → `main` outbound (the final exit, always).
-- **Mains** (`store.Mains`, managed in the TUI **Main** tab): a list of final-exit
-  candidates, each `{Enabled, AllowNoHop}`. `AllowNoHop` mains are tried **direct** (T1);
-  every enabled **non-Vision** main is eligible to be dialed **through a hop** (T2/T3).
-  Vision exits are direct-only (chaining strips their XTLS flow) so they never hop.
-- **Tiers** (auto-cascade with hysteresis; see `engine/supervisor.go`):
+- **Topology**: per slot, a local SOCKS inbound → `main` outbound (the final exit).
+- **Slots** (`store.Slots`, managed in the TUI **Main** tab, CLI `slot`): the app now runs
+  **multiple independent failover pools**, each a `Slot{Name, Port, Enabled, Mains []Main}`.
+  A slot IS the old single-pool model — it keeps its own **best** main online on its **own SOCKS
+  port** via the T1→T2/T3 cascade. Every **enabled** slot runs concurrently (one `engine.slotRunner`
+  each); point any app at any slot's port. One slot is the **TUN slot** (`store.TunSlot`,
+  `TunSlotName()` falls back to the first enabled): the TUN bridge attaches to **that slot's port
+  only**. Legacy single-pool state migrates into a default slot `"main"` on `ListenPort`. `main`
+  CLI + wizard operate on the **first** slot; the TUI manages all slots.
+- **Mains** (`Slot.Mains`, each `{Enabled, AllowNoHop}`): `AllowNoHop` mains are tried **direct**
+  (T1); every enabled **non-Vision** main is eligible to be dialed **through a hop** (T2/T3). Vision
+  exits are direct-only (chaining strips their XTLS flow) so they never hop.
+- **Tiers** (auto-cascade with hysteresis, **per slot**; `slotRunner.cycle` in `engine/supervisor.go`):
   - **T1** a w/o-hop `main` used directly (XTLS-Vision OK here).
   - **T2** a non-Vision `main` dialed *through* a country-exit entry node.
   - **T3** a non-Vision `main` dialed *through* an ОБХОД / bypass (whitelist) entry node.
-- **First-hop port**: while chained (T2/T3), the entry (first hop) is also served on its own
-  local SOCKS port — `store.EntryPort`, default `ListenPort+1` — routed straight out via the
-  `entry` outbound, so you can use/probe hop-1 directly. Ports: main `ListenPort` (default 2084), hop-1 `+1`; egress
-  probes use a throwaway OS-assigned port (`engine.freePort()`), never a fixed one.
+  The entry-node pool + real-egress probe are **shared** across slots (on the manager `Supervisor`);
+  each slot picks its best entry independently. `Pin*`/`ForceHop` tunables are **global** (apply to
+  every slot's cascade) for now.
+- **First-hop port**: only the **default (first) slot** exposes its entry (first hop) on its own
+  local SOCKS port — `store.EntryPort`, default `ListenPort+1` — so extra slots never collide on it.
+  Ports: default slot `ListenPort` (2084), its hop-1 `+1`, extra slots auto-assigned from `+2` up
+  (`store.freeSlotPort`); egress probes use a throwaway OS-assigned port (`engine.freePort()`).
 - **Force-hop** (`store.ForceHop`): skip T1 and always route through a hop (tier bounds → 2..3) —
   a quick "is any hop working?" test that keeps the hop-1 port served. `PinTier`/`PinEntry` still override.
 - **Chaining trick** (`xray.BuildConfig`): a chained `main` dials through the entry via outbound
   `proxySettings.tag`, and its XTLS flow is stripped — a hopped main must be `flow=""` (non-Vision).
 - **TUN mode** (`store.TunEnabled`, `internal/tun`, `engine.syncTun`/`tunUp`/`tunDown`): opt-in
   system-wide capture. A separate **persistent bridge** instance (`xray.BuildTunBridge`: `tun` inbound →
-  `socks` outbound → local `ListenPort`) owns the device, so the exit swaps behind the stable SOCKS port
-  **without churning routes**, and `apply()`/probe paths stay untouched. The OS layer moves the default
+  `socks` outbound → **the TUN slot's** local port) owns the device, so the exit swaps behind the stable
+  SOCKS port **without churning routes**, and `apply()`/probe paths stay untouched. The bridge (and its
+  device) is created **once** and kept for the daemon's lifetime, because on macOS a `utun` **cannot be
+  recreated in-process**: the kernel refuses `SIOCIFDESTROY` while any fd lingers (`ifconfig destroy` →
+  "Invalid argument"), and xray never closes the tun fd on instance close (`AlwaysOnInboundHandler.Close`
+  only closes workers/mux, and the tun handler has none), so the device only dies at process exit. So the
+  bridge dials a **fixed backend port** and a tiny loopback **relay** (`xray.BuildRelay`,
+  `engine.ensureRelay`) forwards that to the selected TUN slot's port. Enabling/disabling TUN toggles only
+  OS routing (`tunDownRouting` keeps the bridge alive); switching the TUN slot rebuilds **only the relay**
+  (`syncTun`) — no device recreation, no routing churn, just a sub-second blip. `tunShutdown` closes the
+  bridge at daemon exit. (`ensureBridge` created it via `engine.freePort`; the device name is still the fixed
+  `tun.DefaultName()` — macOS `utun9`, Linux `clashvless0`.) Crucially, **every** slot's
+  dials are decorated off-tun (below), not just the TUN slot's — so the non-TUN slots keep serving their
+  own ports without looping into the tunnel (the tun path stays a clean `tun → TUN-slot T2/T3 → T1`; a
+  non-TUN slot leaking in would make it `T1(other) → T2/T3 → T1` and break). The OS layer moves the default
   route onto the tun (`0/1`+`128/1` halves) and keeps **xray's own connections off the tunnel** — vital,
   since the failover probes must egress-test candidate exits over a non-tun path or every "ping" fails.
   On Linux that's **fwmark policy routing + SO_BINDTODEVICE**: `xray.SetTunMode(mark,dev,hosts)` makes

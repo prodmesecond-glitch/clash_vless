@@ -158,3 +158,21 @@ func waitForInterface(name string, timeout time.Duration) error {
 		time.Sleep(150 * time.Millisecond)
 	}
 }
+
+// WaitForDeviceGone blocks until no interface named name exists (or timeout),
+// returning true once it's gone. Closing an xray bridge instance destroys its
+// device asynchronously, so recreating a FIXED-name device right away (macOS
+// utun9, Linux clashvless0) races the teardown and fails with "resource busy".
+// Callers wait here before (re)creating so a just-closed device has been freed.
+func WaitForDeviceGone(name string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if _, err := net.InterfaceByName(name); err != nil {
+			return true // not found == released
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}

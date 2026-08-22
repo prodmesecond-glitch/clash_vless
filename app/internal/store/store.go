@@ -57,14 +57,67 @@ type Main struct {
 	AllowNoHop bool   `json:"allow_no_hop"`
 }
 
+// Slot is a failover pool of mains served on its own local SOCKS port. Its
+// supervisor keeps the best working main of the pool online exactly like the
+// single-pool model — a slot IS that model, just one of several. Every enabled
+// slot runs at once, each on its Port; one slot is selected for TUN (see
+// State.TunSlot) and the TUN bridge attaches to that slot's port only. The other
+// slots are independent local proxies — their dials are kept off-tun (like every
+// xray socket in TUN mode) so they never loop into the tunnel.
+type Slot struct {
+	Name    string `json:"name"`
+	Port    int    `json:"port"`
+	Enabled bool   `json:"enabled"`
+	Mains   []Main `json:"mains"`
+}
+
+// DirectMains returns the slot's enabled mains eligible to serve without a hop (T1).
+func (sl *Slot) DirectMains() []Main {
+	var out []Main
+	for _, m := range sl.Mains {
+		if m.Enabled && m.AllowNoHop {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// HopMains returns the slot's enabled mains that can be dialed through a hop
+// (T2/T3). Vision exits are excluded — the chain strips their XTLS flow.
+func (sl *Slot) HopMains() []Main {
+	var out []Main
+	for _, m := range sl.Mains {
+		if m.Enabled && !IsVision(m.URL) {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// AddMain appends a main to the slot (same defaults as State.AddMain).
+func (sl *Slot) AddMain(u string) {
+	sl.Mains = append(sl.Mains, Main{Name: mainName(u), URL: u, Enabled: true, AllowNoHop: IsVision(u) || IsReality(u)})
+}
+
+// RemoveMain deletes the main at index i within the slot.
+func (sl *Slot) RemoveMain(i int) {
+	if i < 0 || i >= len(sl.Mains) {
+		return
+	}
+	sl.Mains = append(sl.Mains[:i], sl.Mains[i+1:]...)
+}
+
 // State is the persisted storage document.
 type State struct {
 	Subs       []Subscription `json:"subs"`
 	ActiveSub  int            `json:"active_sub"`  // index into Subs (used when !AutoSelect)
 	AutoSelect bool           `json:"auto_select"` // true = aggregate every sub's nodes
 
-	Device Device `json:"device"`
-	Mains  []Main `json:"mains"` // final-exit candidates: direct (w/o-hop → T1) and/or hopped (T2/T3)
+	Device  Device `json:"device"`
+	Slots   []Slot `json:"slots"`    // failover pools, each on its own port; one is the TUN slot
+	TunSlot string `json:"tun_slot"` // name of the slot the TUN bridge attaches to ("" = first enabled)
+
+	Mains []Main `json:"mains,omitempty"` // legacy single pool — migrated into Slots[0] on load
 
 	// engine tuning — editable in the TUI config tab (0 = built-in default).
 	ListenPort    int    `json:"listen_port"`
@@ -126,7 +179,7 @@ type State struct {
 const DefaultUA = "Happ/3.13.0"
 
 // Version is the app version, shown in the TUI header and `version` command.
-const Version = "0.15.0"
+const Version = "0.17.0"
 
 func Dir() (string, error) {
 	base, err := os.UserConfigDir()
@@ -218,6 +271,16 @@ func (s *State) migrate() bool {
 	}
 	if s.MainURL != "" || s.MainChainURL != "" {
 		s.MainURL, s.MainChainURL = "", ""
+		changed = true
+	}
+	// Fold the legacy single main pool into the default slot (multi-slot upgrade).
+	if len(s.Mains) > 0 && len(s.Slots) == 0 {
+		port := s.ListenPort
+		if port == 0 {
+			port = defaultListenPort
+		}
+		s.Slots = []Slot{{Name: "main", Port: port, Enabled: true, Mains: s.Mains}}
+		s.Mains = nil
 		changed = true
 	}
 	return changed
@@ -389,42 +452,114 @@ func (s *State) FindNodeByName(name string) *Node {
 	return nil
 }
 
-// DirectMains returns enabled mains eligible to serve without a hop (T1).
-func (s *State) DirectMains() []Main {
-	var out []Main
-	for _, m := range s.Mains {
-		if m.Enabled && m.AllowNoHop {
-			out = append(out, m)
+// DefaultSlot returns the first slot (creating one if the list is somehow
+// empty). Used by the wizard, the standalone up/gen commands, and the legacy
+// State.AddMain/RemoveMain wrappers — all of which operate on one pool.
+func (s *State) DefaultSlot() *Slot {
+	if len(s.Slots) == 0 {
+		s.Slots = []Slot{{Name: "main", Port: s.ListenPort, Enabled: true}}
+	}
+	return &s.Slots[0]
+}
+
+// SlotIndexByName returns the index of the slot named name, or -1.
+func (s *State) SlotIndexByName(name string) int {
+	for i := range s.Slots {
+		if s.Slots[i].Name == name {
+			return i
 		}
 	}
-	return out
+	return -1
 }
 
-// HopMains returns enabled mains that can be dialed through a hop (T2/T3).
-// Vision exits are excluded — the chain strips their XTLS flow.
-func (s *State) HopMains() []Main {
-	var out []Main
-	for _, m := range s.Mains {
-		if m.Enabled && !IsVision(m.URL) {
-			out = append(out, m)
+// SlotByName returns the slot named name, or nil.
+func (s *State) SlotByName(name string) *Slot {
+	if i := s.SlotIndexByName(name); i >= 0 {
+		return &s.Slots[i]
+	}
+	return nil
+}
+
+func (s *State) firstEnabledSlotName() string {
+	for i := range s.Slots {
+		if s.Slots[i].Enabled {
+			return s.Slots[i].Name
 		}
 	}
-	return out
+	return ""
 }
 
-// AddMain appends a main. New mains are enabled; a Vision or REALITY exit defaults
-// to direct-capable (w/o-hop on), a plain exit defaults to hop-only (w/o-hop off).
-func (s *State) AddMain(u string) {
-	s.Mains = append(s.Mains, Main{Name: mainName(u), URL: u, Enabled: true, AllowNoHop: IsVision(u) || IsReality(u)})
+// TunSlotName is the slot the TUN bridge attaches to: the configured TunSlot if
+// it names an enabled slot, else the first enabled slot ("" if none).
+func (s *State) TunSlotName() string {
+	if i := s.SlotIndexByName(s.TunSlot); i >= 0 && s.Slots[i].Enabled {
+		return s.TunSlot
+	}
+	return s.firstEnabledSlotName()
 }
 
-// RemoveMain deletes the main at index i.
-func (s *State) RemoveMain(i int) {
-	if i < 0 || i >= len(s.Mains) {
+// AddSlot appends a new enabled, empty slot with a unique name + free port.
+func (s *State) AddSlot(name string) *Slot {
+	name = strings.TrimSpace(name)
+	if name == "" || s.SlotIndexByName(name) >= 0 {
+		for i := 1; ; i++ {
+			cand := fmt.Sprintf("slot-%d", i)
+			if s.SlotIndexByName(cand) < 0 {
+				name = cand
+				break
+			}
+		}
+	}
+	s.Slots = append(s.Slots, Slot{Name: name, Port: s.freeSlotPort(), Enabled: true})
+	return &s.Slots[len(s.Slots)-1]
+}
+
+// RemoveSlot deletes the slot at index i (always keeps at least one slot).
+func (s *State) RemoveSlot(i int) {
+	if i < 0 || i >= len(s.Slots) || len(s.Slots) <= 1 {
 		return
 	}
-	s.Mains = append(s.Mains[:i], s.Mains[i+1:]...)
+	s.Slots = append(s.Slots[:i], s.Slots[i+1:]...)
 }
+
+// freeSlotPort returns the lowest local port not already claimed by the main
+// port, the entry-hop port, or another slot.
+func (s *State) freeSlotPort() int {
+	used := map[int]bool{s.ListenPort: true, s.ListenPort + 1: true}
+	if s.EntryPort > 0 {
+		used[s.EntryPort] = true
+	}
+	for i := range s.Slots {
+		used[s.Slots[i].Port] = true
+	}
+	for p := s.ListenPort + 2; p < 65535; p++ {
+		if !used[p] {
+			return p
+		}
+	}
+	return 0
+}
+
+// AnyUsableMain reports whether any enabled slot has at least one enabled main.
+func (s *State) AnyUsableMain() bool {
+	for i := range s.Slots {
+		if !s.Slots[i].Enabled {
+			continue
+		}
+		if len(s.Slots[i].DirectMains()) > 0 || len(s.Slots[i].HopMains()) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// DirectMains / HopMains / AddMain / RemoveMain operate on the default slot, for
+// the wizard and the one-pool standalone commands. Per-slot failover uses the
+// Slot methods directly.
+func (s *State) DirectMains() []Main { return s.DefaultSlot().DirectMains() }
+func (s *State) HopMains() []Main    { return s.DefaultSlot().HopMains() }
+func (s *State) AddMain(u string)    { s.DefaultSlot().AddMain(u) }
+func (s *State) RemoveMain(i int)    { s.DefaultSlot().RemoveMain(i) }
 
 // IsVision reports whether a vless URL uses XTLS-Vision flow (direct-only).
 func IsVision(u string) bool {
@@ -538,6 +673,8 @@ func (s *State) RemoveSub(i int) {
 	}
 }
 
+const defaultListenPort = 2084
+
 func (s *State) applyDefaults() (changed bool) {
 	set := func(p *int, v int) {
 		if *p == 0 {
@@ -545,11 +682,51 @@ func (s *State) applyDefaults() (changed bool) {
 			changed = true
 		}
 	}
-	set(&s.ListenPort, 2084)
+	set(&s.ListenPort, defaultListenPort)
 	set(&s.Interval, 12)
 	set(&s.Timeout, 6)
 	set(&s.UpThreshold, 3)
 	set(&s.DownThreshold, 2)
+
+	// Slots: ensure at least one exists, each has a name + non-colliding port,
+	// and TunSlot names an existing (preferably enabled) slot.
+	if len(s.Slots) == 0 {
+		s.Slots = []Slot{{Name: "main", Port: s.ListenPort, Enabled: true}}
+		changed = true
+	}
+	used := map[int]bool{s.ListenPort: true, s.ListenPort + 1: true}
+	if s.EntryPort > 0 {
+		used[s.EntryPort] = true
+	}
+	for i := range s.Slots {
+		if s.Slots[i].Port > 0 {
+			used[s.Slots[i].Port] = true
+		}
+	}
+	for i := range s.Slots {
+		if s.Slots[i].Name == "" {
+			s.Slots[i].Name = fmt.Sprintf("slot-%d", i+1)
+			changed = true
+		}
+		if s.Slots[i].Port == 0 {
+			p := s.ListenPort + 2
+			for used[p] {
+				p++
+			}
+			s.Slots[i].Port, used[p] = p, true
+			changed = true
+		}
+	}
+	if s.SlotIndexByName(s.TunSlot) < 0 {
+		want := s.firstEnabledSlotName()
+		if want == "" {
+			want = s.Slots[0].Name
+		}
+		if s.TunSlot != want {
+			s.TunSlot = want
+			changed = true
+		}
+	}
 	return
 }
 

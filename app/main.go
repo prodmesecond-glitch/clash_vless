@@ -107,6 +107,9 @@ func run(args []string) error {
 	case "main":
 		return cmdMain(st, args[1:])
 
+	case "slot", "slots":
+		return cmdSlot(st, args[1:])
+
 	case "whoami":
 		printDevice(st)
 		return nil
@@ -158,9 +161,11 @@ func run(args []string) error {
 		fmt.Println("  add <url>        add a subscription (fetches it)")
 		fmt.Println("  subs             list subscriptions")
 		fmt.Println("  rm <index>       remove a subscription")
-		fmt.Println("  main                  list final-exit mains")
-		fmt.Println("  main add <vless://>   add a main (Vision → direct/T1, plain → hop/T2)")
-		fmt.Println("  main rm <index>       remove a main")
+		fmt.Println("  main                  list slots + their final-exit mains")
+		fmt.Println("  main add <vless://> [slot]   add a main (Vision → direct/T1, plain → hop/T2)")
+		fmt.Println("  main rm <index> [slot]       remove a main")
+		fmt.Println("  slot                  list slots (failover pools, each on its own port)")
+		fmt.Println("  slot add [name] · rm <name> · port <name> <port> · tun <name> · enable|disable <name>")
 		fmt.Println("  fetch            refetch all subscriptions")
 		fmt.Println("  fetch-proxy [addr|off]  fetch subs through a proxy: socks5://h:p, http://h:p, or h:p (socks5)")
 		fmt.Println("  loglevel [none|error|warning|info|debug]  xray log verbosity")
@@ -230,7 +235,7 @@ func cmdUp(st *store.State, args []string) error {
 // cmdRun runs the failover supervisor: it keeps the single local port served by
 // the best available tier and re-evaluates continuously (failover + recovery).
 func cmdRun(st *store.State, debug bool) error {
-	if len(st.DirectMains()) == 0 && len(st.HopMains()) == 0 {
+	if !st.AnyUsableMain() {
 		fmt.Println("note: no main yet — the daemon will idle (DOWN). Open the TUI to run setup: clashvless tui")
 	}
 	if len(st.ActiveNodes()) == 0 {
@@ -605,6 +610,15 @@ func cmdTun(st *store.State, args []string) error {
 		}
 		fmt.Printf("TUN mode: %s\n", onOff(st.TunEnabled))
 		fmt.Printf("  os support: %v   this process privileged: %v\n", tun.Supported(), tun.Privileged())
+		if ts := st.TunSlotName(); ts != "" {
+			port := 0
+			if sl := st.SlotByName(ts); sl != nil {
+				port = sl.Port
+			}
+			fmt.Printf("  slot %q (:%d)   — the exit TUN routes through\n", ts, port)
+		} else {
+			fmt.Printf("  slot (none — enable a slot in the Main tab)\n")
+		}
 		fmt.Printf("  device %s   addr %s   mtu %d\n", name, st.TunAddress(), st.TunMTUOr())
 		fmt.Printf("  dns %s\n", tunDNSDisplay(st))
 		fmt.Printf("  lan %s\n", tunLANLabel(st.TunBypassLAN()))
@@ -709,7 +723,8 @@ func cmdSubs(st *store.State) error {
 	return nil
 }
 
-// cmdMain lists, adds, or removes final-exit mains.
+// cmdMain lists mains across slots, or adds/removes a main in a slot (default =
+// first slot; `main add <url> [slot]` targets a named slot).
 func cmdMain(st *store.State, args []string) error {
 	if len(args) == 0 {
 		return listMains(st)
@@ -717,38 +732,161 @@ func cmdMain(st *store.State, args []string) error {
 	switch args[0] {
 	case "add":
 		if len(args) < 2 {
-			return errors.New("usage: clashvless main add <vless://...>")
+			return errors.New("usage: clashvless main add <vless://...> [slot]")
 		}
-		return addMainCLI(st, args[1])
+		return addMainCLI(st, args[1], argOr(args, 2, ""))
 	case "rm", "remove", "del":
 		if len(args) < 2 {
-			return errors.New("usage: clashvless main rm <index>")
+			return errors.New("usage: clashvless main rm <index> [slot]")
 		}
 		i, err := strconv.Atoi(args[1])
 		if err != nil {
 			return fmt.Errorf("invalid index %q", args[1])
 		}
-		st.RemoveMain(i)
+		sl, err := slotArg(st, argOr(args, 2, ""))
+		if err != nil {
+			return err
+		}
+		sl.RemoveMain(i)
 		if err := st.Save(); err != nil {
 			return err
 		}
 		return listMains(st)
 	default:
-		return addMainCLI(st, args[0]) // bare `main <vless://>` = add
+		return addMainCLI(st, args[0], "") // bare `main <vless://>` = add to first slot
 	}
 }
 
-func addMainCLI(st *store.State, u string) error {
+func addMainCLI(st *store.State, u, slot string) error {
 	u = strings.TrimSpace(u)
 	if _, err := xray.VlessToOutbound(u, "main"); err != nil {
 		return fmt.Errorf("invalid vless url: %w", err)
 	}
-	st.AddMain(u)
+	sl, err := slotArg(st, slot)
+	if err != nil {
+		return err
+	}
+	sl.AddMain(u)
 	if err := st.Save(); err != nil {
 		return err
 	}
-	fmt.Printf("✓ added — %s\n", mainModeHint(u))
+	fmt.Printf("✓ added to slot %q — %s\n", sl.Name, mainModeHint(u))
 	return listMains(st)
+}
+
+func argOr(args []string, i int, def string) string {
+	if i < len(args) {
+		return args[i]
+	}
+	return def
+}
+
+// slotArg resolves a slot by name or index; "" selects the first slot.
+func slotArg(st *store.State, s string) (*store.Slot, error) {
+	if len(st.Slots) == 0 {
+		st.DefaultSlot()
+	}
+	if s == "" {
+		return &st.Slots[0], nil
+	}
+	if i := st.SlotIndexByName(s); i >= 0 {
+		return &st.Slots[i], nil
+	}
+	if n, err := strconv.Atoi(s); err == nil && n >= 0 && n < len(st.Slots) {
+		return &st.Slots[n], nil
+	}
+	return nil, fmt.Errorf("no slot %q (see `clashvless slot`)", s)
+}
+
+// cmdSlot manages slots — failover pools, each served on its own SOCKS port.
+func cmdSlot(st *store.State, args []string) error {
+	if len(args) == 0 {
+		return listMains(st)
+	}
+	switch args[0] {
+	case "add":
+		sl := st.AddSlot(argOr(args, 1, ""))
+		if err := st.Save(); err != nil {
+			return err
+		}
+		fmt.Printf("✓ slot %q added on :%d\n", sl.Name, sl.Port)
+		return listMains(st)
+	case "rm", "remove", "del":
+		if len(args) < 2 {
+			return errors.New("usage: clashvless slot rm <name|index>")
+		}
+		if len(st.Slots) <= 1 {
+			return errors.New("can't remove the last slot")
+		}
+		i, err := slotIndexArg(st, args[1])
+		if err != nil {
+			return err
+		}
+		name := st.Slots[i].Name
+		st.RemoveSlot(i)
+		if err := st.Save(); err != nil {
+			return err
+		}
+		fmt.Printf("✓ slot %q removed\n", name)
+		return listMains(st)
+	case "port":
+		if len(args) < 3 {
+			return errors.New("usage: clashvless slot port <name> <port>")
+		}
+		sl, err := slotArg(st, args[1])
+		if err != nil {
+			return err
+		}
+		p, err := strconv.Atoi(args[2])
+		if err != nil || p < 1024 || p > 65535 {
+			return fmt.Errorf("invalid port %q (1024–65535)", args[2])
+		}
+		sl.Port = p
+		if err := st.Save(); err != nil {
+			return err
+		}
+		fmt.Printf("✓ slot %q → :%d (restart the daemon to apply)\n", sl.Name, p)
+		return listMains(st)
+	case "tun":
+		if len(args) < 2 {
+			return errors.New("usage: clashvless slot tun <name>")
+		}
+		sl, err := slotArg(st, args[1])
+		if err != nil {
+			return err
+		}
+		st.TunSlot = sl.Name
+		if err := st.Save(); err != nil {
+			return err
+		}
+		fmt.Printf("✓ TUN slot → %q (:%d)\n", sl.Name, sl.Port)
+		return listMains(st)
+	case "enable", "disable":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: clashvless slot %s <name>", args[0])
+		}
+		sl, err := slotArg(st, args[1])
+		if err != nil {
+			return err
+		}
+		sl.Enabled = args[0] == "enable"
+		if err := st.Save(); err != nil {
+			return err
+		}
+		return listMains(st)
+	default:
+		return fmt.Errorf("usage: clashvless slot [add|rm|port|tun|enable|disable] …")
+	}
+}
+
+func slotIndexArg(st *store.State, s string) (int, error) {
+	if i := st.SlotIndexByName(s); i >= 0 {
+		return i, nil
+	}
+	if n, err := strconv.Atoi(s); err == nil && n >= 0 && n < len(st.Slots) {
+		return n, nil
+	}
+	return -1, fmt.Errorf("no slot %q", s)
 }
 
 func mainModeHint(u string) string {
@@ -763,26 +901,39 @@ func mainModeHint(u string) string {
 }
 
 func listMains(st *store.State) error {
-	if len(st.Mains) == 0 {
-		fmt.Println("no mains — add one: clashvless main add <vless://...>")
-		return nil
-	}
-	fmt.Println("mains (final exits):")
-	for i := range st.Mains {
-		m := st.Mains[i]
-		en := "✗"
-		if m.Enabled {
-			en = "✓"
+	tun := st.TunSlotName()
+	fmt.Println("slots (failover pools · ◉ = TUN slot):")
+	for si := range st.Slots {
+		sl := &st.Slots[si]
+		mark := " "
+		if sl.Name == tun {
+			mark = "◉"
 		}
-		mode := "hop-only"
-		if m.AllowNoHop {
-			mode = "direct-ok"
+		state := "off"
+		if sl.Enabled {
+			state = "on"
 		}
-		vis := ""
-		if store.IsVision(m.URL) {
-			vis = "  [vision]"
+		fmt.Printf("%s slot %q  :%d  [%s]\n", mark, sl.Name, sl.Port, state)
+		if len(sl.Mains) == 0 {
+			fmt.Printf("    (no mains — clashvless main add <vless://...> %s)\n", sl.Name)
+			continue
 		}
-		fmt.Printf("  [%d] %s enabled  %-26s  %s%s\n", i, en, trunc(m.Name, 26), mode, vis)
+		for i := range sl.Mains {
+			m := sl.Mains[i]
+			en := "✗"
+			if m.Enabled {
+				en = "✓"
+			}
+			mode := "hop-only"
+			if m.AllowNoHop {
+				mode = "direct-ok"
+			}
+			vis := ""
+			if store.IsVision(m.URL) {
+				vis = "  [vision]"
+			}
+			fmt.Printf("    [%d] %s %-26s  %s%s\n", i, en, trunc(m.Name, 26), mode, vis)
+		}
 	}
 	return nil
 }

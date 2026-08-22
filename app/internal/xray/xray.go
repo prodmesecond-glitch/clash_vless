@@ -281,6 +281,36 @@ func BuildTunBridge(socksPort int, tunName string, mtu int, logLevel string) (js
 	return json.MarshalIndent(cfg, "", "  ")
 }
 
+// BuildRelay assembles a tiny local SOCKS→SOCKS forwarder: a socks inbound on
+// 127.0.0.1:listenPort → a socks outbound to 127.0.0.1:targetPort. The persistent
+// TUN bridge dials the STABLE listenPort; the relay forwards to whichever slot is
+// currently selected for TUN. Switching the TUN slot then only rebuilds this
+// cheap relay — never the tun device, which macOS cannot recreate in-process (the
+// kernel won't destroy a utun while any fd lingers, and xray leaks that fd until
+// the process exits). Loopback-only, so it stays off the tunnel automatically.
+func BuildRelay(listenPort, targetPort int, logLevel string) (json.RawMessage, error) {
+	ll := logLevel
+	if ll == "" {
+		ll = "warning"
+	}
+	cfg := map[string]any{
+		"log":      map[string]any{"loglevel": ll},
+		"inbounds": []any{socksInbound("relay-in", listenPort, "127.0.0.1")},
+		"outbounds": []any{map[string]any{
+			"tag":      "to-slot",
+			"protocol": "socks",
+			"settings": map[string]any{"servers": []any{map[string]any{
+				"address": "127.0.0.1",
+				"port":    targetPort,
+			}}},
+		}},
+		"routing": map[string]any{"rules": []any{
+			map[string]any{"type": "field", "inboundTag": []any{"relay-in"}, "outboundTag": "to-slot"},
+		}},
+	}
+	return json.MarshalIndent(cfg, "", "  ")
+}
+
 // socksInbound builds a local SOCKS5 inbound on 127.0.0.1:port with the given tag.
 func socksInbound(tag string, port int, listen string) map[string]any {
 	if listen == "" {

@@ -45,28 +45,32 @@ const (
 	inputNone = iota
 	inputAddSub
 	inputAddMain
+	inputAddSlot
+	inputSlotPort
 	inputEditCfg
 	inputEditStr
 )
 
 type model struct {
-	st        *store.State
-	client    *control.Client
-	embedded  bool // true = this TUI started its own in-process daemon (no standalone `run`)
-	status    engine.Status
-	logs      []string
-	width     int
-	height    int
-	tab        int
-	cfgCursor  int
-	mainCursor int          // Main tab: index into st.Mains
-	rowCursor  int          // Subs tab: index into the flattened sub/node rows
-	rowScroll int
-	expanded  map[int]bool // Subs tab: which subs are expanded (dropdown)
-	inputMode int
-	inputBuf  string
-	busy      string
-	subErr    map[string]string // per-sub last fetch error (transient), keyed by URL
+	st          *store.State
+	client      *control.Client
+	embedded    bool // true = this TUI started its own in-process daemon (no standalone `run`)
+	status      engine.Status
+	logs        []string
+	width       int
+	height      int
+	tab         int
+	cfgCursor   int
+	mainCursor  int // Main tab: index into the flattened slot/main rows
+	addMainSlot int // Main tab: slot index a new main is added to
+	portSlot    int // Main tab: slot index whose port is being edited
+	rowCursor   int // Subs tab: index into the flattened sub/node rows
+	rowScroll   int
+	expanded    map[int]bool // Subs tab: which subs are expanded (dropdown)
+	inputMode   int
+	inputBuf    string
+	busy        string
+	subErr      map[string]string // per-sub last fetch error (transient), keyed by URL
 
 	// first-run setup wizard (see wizard.go)
 	wiz        int
@@ -212,6 +216,22 @@ func (m *model) handleInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			_ = m.client.Send(control.Command{Cmd: "addsub", URL: u})
 		case inputAddMain:
 			m.addMain(sanitizeURL(raw))
+		case inputAddSlot:
+			name := strings.TrimSpace(raw)
+			m.apply(func(st *store.State) { st.AddSlot(name) })
+			m.busy = "slot added"
+		case inputSlotPort:
+			if v, err := strconv.Atoi(strings.TrimSpace(raw)); err == nil && v >= 1024 && v <= 65535 {
+				s := m.portSlot
+				m.apply(func(st *store.State) {
+					if s >= 0 && s < len(st.Slots) {
+						st.Slots[s].Port = v
+					}
+				})
+				m.busy = "port set — restart the daemon to apply"
+			} else {
+				m.busy = "invalid port (1024–65535)"
+			}
 		case inputEditCfg:
 			if v, err := strconv.Atoi(strings.TrimSpace(raw)); err == nil {
 				m.setCfg(m.cfgCursor, v)
@@ -230,7 +250,7 @@ func (m *model) handleInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyRunes:
 		for _, r := range msg.Runes {
 			switch {
-			case m.inputMode == inputEditCfg:
+			case m.inputMode == inputEditCfg || m.inputMode == inputSlotPort:
 				if r >= '0' && r <= '9' {
 					m.inputBuf += string(r)
 				}
@@ -622,9 +642,29 @@ func (m *model) statusView() string {
 	if s.Note != "" {
 		conn += "\n" + dimStyle.Render(s.Note)
 	}
-	conn += "\n" + dimStyle.Render(fmt.Sprintf("socks5://%s:%d", m.st.ListenHost(), m.st.ListenPort))
-	if s.Tier >= 2 && s.Entry != "" {
-		conn += "\n" + dimStyle.Render(fmt.Sprintf("first-hop  :%d → %s", m.st.EntryListenPort(), trunc(s.Entry, 22)))
+	if s.TunErr != "" {
+		conn += "\n" + badStyle.Render(s.TunErr)
+	}
+	// One line per enabled slot: its local SOCKS port + live tier (◉ = TUN slot).
+	ssByName := map[string]engine.SlotStatus{}
+	for _, x := range s.Slots {
+		ssByName[x.Name] = x
+	}
+	tunName := m.st.TunSlotName()
+	for i := range m.st.Slots {
+		sl := &m.st.Slots[i]
+		if !sl.Enabled {
+			continue
+		}
+		mark := "  "
+		if sl.Name == tunName {
+			mark = okStyle.Render("◉ ")
+		}
+		line := mark + dimStyle.Render(fmt.Sprintf("socks5://%s:%-5d %s", m.st.ListenHost(), sl.Port, trunc(sl.Name, 12)))
+		if st, ok := ssByName[sl.Name]; ok {
+			line += "  " + slotLiveLabel(st)
+		}
+		conn += "\n" + line
 	}
 
 	nodes := m.st.ActiveNodes()
@@ -747,48 +787,115 @@ func (m *model) probeByName() map[string]engine.Probe {
 	return p
 }
 
+// mainRow addresses one navigable line in the Main tab: a slot header
+// (main == -1) or a main within a slot.
+type mainRow struct {
+	slot int
+	main int
+}
+
+func (m *model) mainRows() []mainRow {
+	var rows []mainRow
+	for si := range m.st.Slots {
+		rows = append(rows, mainRow{slot: si, main: -1})
+		for mi := range m.st.Slots[si].Mains {
+			rows = append(rows, mainRow{slot: si, main: mi})
+		}
+	}
+	return rows
+}
+
 func (m *model) mainView() string {
 	var b strings.Builder
-	b.WriteString(sectionStyle.Render("MAIN EXITS") + "   " + dimStyle.Render("w/o-hop → T1 direct · others → hop (T2/T3)") + "\n\n")
-	if len(m.st.Mains) == 0 {
-		b.WriteString(dimStyle.Render("  no mains — press ") + keyStyle.Render("a") + dimStyle.Render(" to add a vless:// exit"))
+	b.WriteString(sectionStyle.Render("MAIN SLOTS") + "   " + dimStyle.Render("each slot = a failover pool on its own port · ◉ = TUN slot") + "\n\n")
+	if len(m.st.Slots) == 0 {
+		b.WriteString(dimStyle.Render("  no slots — press ") + keyStyle.Render("s") + dimStyle.Render(" to add one"))
 		return b.String()
 	}
 	m.clampMainCursor()
-	for i := range m.st.Mains {
-		mn := &m.st.Mains[i]
+	ss := map[string]engine.SlotStatus{}
+	for _, s := range m.status.Slots {
+		ss[s.Name] = s
+	}
+	tunName := m.st.TunSlotName()
+	ri := 0
+	for si := range m.st.Slots {
+		sl := &m.st.Slots[si]
 		cur := "  "
-		if i == m.mainCursor {
+		if ri == m.mainCursor {
 			cur = activeStyle.Render("▸ ")
 		}
-		live := "  "
-		if m.status.Tier > 0 && m.status.Main == mn.Name {
-			live = okStyle.Render("● ")
+		ri++
+		tunMark := "  "
+		if sl.Name == tunName {
+			tunMark = okStyle.Render("◉ ")
 		}
-		en := badStyle.Render("[ ]")
-		if mn.Enabled {
-			en = okStyle.Render("[x]")
+		en := badStyle.Render("off")
+		if sl.Enabled {
+			en = okStyle.Render("on ")
 		}
-		hop := "[ ]"
-		if mn.AllowNoHop {
-			hop = "[x]"
+		live := dimStyle.Render("idle")
+		if st, ok := ss[sl.Name]; ok {
+			live = slotLiveLabel(st)
 		}
-		tag := ""
-		if raw := store.ProtoTag(mn.URL); raw != "" {
-			tag = "  " + protoStyle(raw).Render(raw)
+		b.WriteString(fmt.Sprintf("%s%s%-14s :%-5d %s  %s\n", cur, tunMark, trunc(sl.Name, 14), sl.Port, en, live))
+		for mi := range sl.Mains {
+			mn := &sl.Mains[mi]
+			c2 := "     "
+			if ri == m.mainCursor {
+				c2 = "   " + activeStyle.Render("▸ ")
+			}
+			ri++
+			enb := badStyle.Render("[ ]")
+			if mn.Enabled {
+				enb = okStyle.Render("[x]")
+			}
+			hop := "[ ]"
+			if mn.AllowNoHop {
+				hop = "[x]"
+			}
+			tag := ""
+			if raw := store.ProtoTag(mn.URL); raw != "" {
+				tag = "  " + protoStyle(raw).Render(raw)
+			}
+			b.WriteString(fmt.Sprintf("%s%s %-16s %-17s w/o-hop %s%s\n", c2, enb, trunc(mn.Name, 16), hostOf(mn.URL), hop, tag))
 		}
-		b.WriteString(fmt.Sprintf("%s%s%-20s %-19s  enable %s  w/o-hop %s%s\n",
-			cur, live, trunc(mn.Name, 20), hostOf(mn.URL), en, hop, tag))
 	}
-	if m.inputMode == inputAddMain {
+	switch m.inputMode {
+	case inputAddMain:
 		b.WriteString("\n" + sectionStyle.Render("add main URL: ") + m.inputBuf + "▏")
+	case inputAddSlot:
+		b.WriteString("\n" + sectionStyle.Render("new slot name (blank = auto): ") + m.inputBuf + "▏")
+	case inputSlotPort:
+		b.WriteString("\n" + sectionStyle.Render("slot SOCKS port: ") + m.inputBuf + "▏")
 	}
-	b.WriteString("\n" + dimStyle.Render("  enable = use it · w/o-hop = allow direct (T1); off = hop-only. Vision must stay direct."))
+	b.WriteString("\n" + dimStyle.Render("  ") + keyStyle.Render("s") + dimStyle.Render(" add slot · ") + keyStyle.Render("a") + dimStyle.Render(" add main · ") + keyStyle.Render("p") + dimStyle.Render(" port · ") + keyStyle.Render("t") + dimStyle.Render(" TUN slot · ") + keyStyle.Render("e") + dimStyle.Render(" enable · ") + keyStyle.Render("w") + dimStyle.Render(" w/o-hop · ") + keyStyle.Render("d") + dimStyle.Render(" delete"))
 	return b.String()
 }
 
+// slotLiveLabel renders a slot's current failover state compactly.
+func slotLiveLabel(s engine.SlotStatus) string {
+	switch {
+	case s.Tier == 1:
+		return okStyle.Render("T1") + " " + trunc(s.Main, 14)
+	case s.Tier >= 2:
+		return okStyle.Render(fmt.Sprintf("T%d", s.Tier)) + " " + trunc(s.Entry, 10) + "→" + trunc(s.Main, 12)
+	case s.Err != "":
+		return badStyle.Render("down")
+	default:
+		return dimStyle.Render("…")
+	}
+}
+
 func (m *model) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	n := len(m.st.Mains)
+	rows := m.mainRows()
+	n := len(rows)
+	m.clampMainCursor()
+	var cur mainRow
+	cur.main = -1
+	if m.mainCursor >= 0 && m.mainCursor < n {
+		cur = rows[m.mainCursor]
+	}
 	switch msg.String() {
 	case "up", "k":
 		if m.mainCursor > 0 {
@@ -798,35 +905,72 @@ func (m *model) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.mainCursor < n-1 {
 			m.mainCursor++
 		}
+	case "s":
+		m.inputMode, m.inputBuf, m.busy = inputAddSlot, "", "slot name (Enter; blank = auto)"
 	case "a":
+		m.addMainSlot = cur.slot
 		m.inputMode, m.inputBuf, m.busy = inputAddMain, "", "paste vless:// URL, Enter to add"
+	case "p":
+		m.portSlot = cur.slot
+		m.inputMode, m.inputBuf, m.busy = inputSlotPort, "", "slot SOCKS port (Enter)"
+	case "t":
+		if cur.slot < len(m.st.Slots) {
+			name := m.st.Slots[cur.slot].Name
+			m.apply(func(st *store.State) { st.TunSlot = name })
+			m.busy = "TUN slot → " + name
+		}
 	case "e", "enter":
-		if n > 0 {
-			m.toggleMain(m.mainCursor, true)
+		if cur.main >= 0 {
+			m.toggleMain(cur.slot, cur.main, true)
+		} else {
+			m.toggleSlotEnabled(cur.slot)
 		}
 	case " ", "space", "w":
-		if n > 0 {
-			m.toggleMain(m.mainCursor, false)
+		if cur.main >= 0 {
+			m.toggleMain(cur.slot, cur.main, false)
 		}
 	case "d":
-		if n > 0 {
-			i := m.mainCursor
-			m.apply(func(st *store.State) { st.RemoveMain(i) })
+		if cur.main >= 0 {
+			s, i := cur.slot, cur.main
+			m.apply(func(st *store.State) {
+				if s < len(st.Slots) {
+					st.Slots[s].RemoveMain(i)
+				}
+			})
 			m.busy = "removed"
+		} else if len(m.st.Slots) > 1 {
+			s := cur.slot
+			m.apply(func(st *store.State) { st.RemoveSlot(s) })
+			m.busy = "slot removed"
+		} else {
+			m.busy = "can't remove the last slot"
 		}
 	}
 	return m, nil
 }
 
-func (m *model) toggleMain(i int, enable bool) {
+func (m *model) toggleMain(slotIdx, mainIdx int, enable bool) {
 	m.apply(func(st *store.State) {
-		if i < 0 || i >= len(st.Mains) {
+		if slotIdx < 0 || slotIdx >= len(st.Slots) {
+			return
+		}
+		sl := &st.Slots[slotIdx]
+		if mainIdx < 0 || mainIdx >= len(sl.Mains) {
 			return
 		}
 		if enable {
-			st.Mains[i].Enabled = !st.Mains[i].Enabled
+			sl.Mains[mainIdx].Enabled = !sl.Mains[mainIdx].Enabled
 		} else {
-			st.Mains[i].AllowNoHop = !st.Mains[i].AllowNoHop
+			sl.Mains[mainIdx].AllowNoHop = !sl.Mains[mainIdx].AllowNoHop
+		}
+	})
+	m.busy = "saved ✓"
+}
+
+func (m *model) toggleSlotEnabled(slotIdx int) {
+	m.apply(func(st *store.State) {
+		if slotIdx >= 0 && slotIdx < len(st.Slots) {
+			st.Slots[slotIdx].Enabled = !st.Slots[slotIdx].Enabled
 		}
 	})
 	m.busy = "saved ✓"
@@ -837,13 +981,21 @@ func (m *model) addMain(u string) {
 		m.busy = "invalid vless:// URL"
 		return
 	}
-	m.apply(func(st *store.State) { st.AddMain(u) })
+	s := m.addMainSlot
+	m.apply(func(st *store.State) {
+		if s >= 0 && s < len(st.Slots) {
+			st.Slots[s].AddMain(u)
+		} else {
+			st.AddMain(u)
+		}
+	})
 	m.busy = "main added"
 }
 
 func (m *model) clampMainCursor() {
-	if m.mainCursor >= len(m.st.Mains) {
-		m.mainCursor = len(m.st.Mains) - 1
+	n := len(m.mainRows())
+	if m.mainCursor >= n {
+		m.mainCursor = n - 1
 	}
 	if m.mainCursor < 0 {
 		m.mainCursor = 0

@@ -37,7 +37,14 @@ func (m *model) maybeStartWizard() {
 	if m.wizSeen || m.wiz != wizOff || m.st == nil {
 		return
 	}
-	if len(m.st.Subs) == 0 && len(m.st.Mains) == 0 {
+	hasMain := false
+	for i := range m.st.Slots {
+		if len(m.st.Slots[i].Mains) > 0 {
+			hasMain = true
+			break
+		}
+	}
+	if len(m.st.Subs) == 0 && !hasMain {
 		m.wiz, m.wizSeen = wizWelcome, true
 	}
 }
@@ -214,9 +221,11 @@ func (m *model) removeSubByURL(u string) {
 }
 
 func (m *model) removeMainByURL(u string) {
-	for i := range m.st.Mains {
-		if m.st.Mains[i].URL == u {
-			m.apply(func(st *store.State) { st.RemoveMain(i) })
+	sl := m.st.DefaultSlot()
+	for i := range sl.Mains {
+		if sl.Mains[i].URL == u {
+			idx := i
+			m.apply(func(st *store.State) { st.DefaultSlot().RemoveMain(idx) })
 			return
 		}
 	}
@@ -325,8 +334,9 @@ func (m *model) wizSummary() string {
 		nnode += len(m.st.Subs[i].Nodes)
 	}
 	exit, tag := "—", ""
-	if len(m.st.Mains) > 0 {
-		last := m.st.Mains[len(m.st.Mains)-1]
+	sl := m.st.DefaultSlot()
+	if len(sl.Mains) > 0 {
+		last := sl.Mains[len(sl.Mains)-1]
 		exit = trunc(last.Name, 28)
 		if store.IsPlain(last.URL) {
 			tag = okStyle.Render(" (plain ✓)")
@@ -337,5 +347,5 @@ func (m *model) wizSummary() string {
 	return fmt.Sprintf("  subs: %d  ·  nodes: %d\n  exit: %s%s", len(m.st.Subs), nnode, exit, tag)
 }
 
-func step(n int) string  { return sectionStyle.Render(fmt.Sprintf("Step %d/3 — ", n)) }
+func step(n int) string   { return sectionStyle.Render(fmt.Sprintf("Step %d/3 — ", n)) }
 func key(k string) string { return keyStyle.Render("[" + k + "]") }

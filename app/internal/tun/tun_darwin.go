@@ -31,8 +31,17 @@ func FwMark() int32 { return 0 }
 // UplinkDevice is unused off Linux (bypass is by explicit per-server routes).
 func UplinkDevice() string { return "" }
 
-// RemoveDevice is a no-op off Linux (utun devices are kernel-managed).
-func RemoveDevice(string) {}
+// RemoveDevice force-destroys a utun by name. Closing the xray bridge instance
+// does NOT reliably release the kernel utun on macOS — the control fd lingers, so
+// recreating the same fixed name (utun9) on a re-point / off→on hits "resource
+// busy". `ifconfig <name> destroy` removes it (the same command that clears a
+// stuck device by hand). Best-effort; ignore the error when it's already gone.
+func RemoveDevice(name string) {
+	if name == "" {
+		return
+	}
+	_ = exec.Command("ifconfig", name, "destroy").Run()
+}
 
 // SystemResolver returns the resolver the host used before TUN (first
 // non-loopback IPv4 nameserver in /etc/resolv.conf, which macOS keeps in sync
