@@ -366,7 +366,9 @@ func (e *endpoint) handleICMP(pkt *stack.PacketBuffer) {
 
 		// Skip direct ICMP echo reply if the packet was received with a temporary
 		// address, allowing custom handlers to take over.
-		if localAddressTemporary {
+		// clashvless: unless ReplyToTemporaryEcho is set (TUN mode wants ping to
+		// work) — every tun-captured remote dst is a promiscuous temporary address.
+		if localAddressTemporary && !ReplyToTemporaryEcho.Load() {
 			return
 		}
 

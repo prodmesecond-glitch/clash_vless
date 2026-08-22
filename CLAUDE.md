@@ -27,8 +27,10 @@ or a **system-wide TUN** — with automatic tiered failover.
     via **fwmark policy routing** (`tun.FwMark`, a private table for marked traffic), on Windows/macOS via
     per-server bypass routes. Sets exit-routed DNS; `Down()` restores everything. Needs root/admin. Device
     name default is OS-specific (`tun.DefaultName()`: `clashvless0` on Linux/Windows, `utunN` on macOS —
-    xray requires that form and assigns the utun's address itself). Forwards TCP/UDP only — **ICMP/`ping`
-    does not traverse the tunnel**; test with `curl`, not `ping`.
+    xray requires that form and assigns the utun's address itself). Forwards TCP/UDP only; **ICMP can't
+    traverse the SOCKS/VLESS tunnel** — but the tun netstack now answers `ping` locally (see **ICMP ping**
+    below), so `ping` works as a device-liveness check. It does NOT prove the exit is reachable — use `curl`
+    for end-to-end.
   - `cmd/xhserver` — local test rig: Vision-reality hop (`:9001`) + xhttp-reality exit (`:9002`) +
     plain-reality (non-Vision) hop (`:9003`), to point a client config at (direct T1 / hopped T2).
     Separate `main` (pulls in vless/inbound); not in the app binary.
@@ -37,7 +39,9 @@ or a **system-wide TUN** — with automatic tiered failover.
     printing PASS/FAIL. Proves why chaining uses dialerProxy; re-run after any xray-core bump.
   - `cmd/tunprobe` — root/admin-only lab: starts JUST the TUN bridge, confirms xray creates the device,
     then tears down **without touching routing** (safe). Answers "does the native tun inbound work here?".
-- `app/vendor/` — vendored deps (committed; builds are hermetic/offline).
+- `app/vendor/` — vendored deps (committed; builds are hermetic/offline). Holds **one local patch**
+  (grep `clashvless`): gVisor `network/ipv4` echo-reply gate for TUN ping — see **ICMP ping**. Re-apply after
+  any re-vendor.
 - `dist/` — prebuilt release binaries (**not committed**; build artifacts).
 
 ## Build & run
@@ -50,7 +54,7 @@ go -C app build ./...                        # compile-check every package
 an in-process daemon** if none is running (stops when the TUI exits), so a fresh install needs no shell:
 `clashvless tui` → the setup wizard opens on the empty config. `run` no longer requires a main (idles DOWN).
 Key commands: `add <url>`, `fetch`, `fetch-proxy [host:port|off]`, `loglevel [level]`, `main add <vless://>`,
-`up [entry]`, `run`, `tun [on|off|status|dns <ip>|dns direct|dns tunnel]`, `whoami`. See the default-case
+`up [entry]`, `run`, `tun [on|off|status|dns <ip>|dns direct|dns tunnel|lan …|ipv6 …|icmp on|off]`, `whoami`. See the default-case
 help block in `main.go`.
 For **TUN mode** the daemon must be elevated: `sudo clashvless run` (then attach the TUI as a client).
 
@@ -119,6 +123,19 @@ For **TUN mode** the daemon must be elevated: `sudo clashvless run` (then attach
     (`10/8`,`172.16/12`,`192.168/16`) via the gateway + link-local (`169.254/16`) and multicast (`224/4`)
     on-link. Loopback/broadcast need no route (the kernel's `local` table already keeps them off-tun). `osDown`
     removes them. Set `tun lan tunnel` to capture private ranges too (full tunnel).
+  - **ICMP ping** (`store.TunICMP()`, default **on**; `TunNoICMP`=false; toggle `tun icmp on|off`, Config-tab
+    **TUN ICMP ping**): makes `ping` work under TUN. ICMP can't cross the SOCKS/VLESS tunnel (freedom outbound
+    dials TCP/UDP only), so this is a **local synthetic reply** from the tun netstack — device liveness, NOT
+    end-to-end exit reachability (a ping succeeds whenever the tun stack is up, even if the exit is down; use
+    `curl` for real end-to-end). Mechanism: xray-core's gVisor tun stack runs promiscuous, so every captured
+    remote dst is a *temporary* address, and gVisor's `ipv4/icmp.go` deliberately skips the echo reply for
+    temporary addresses (handing it to a custom handler xray never installs). We flip that skip via a **local
+    vendored patch**: `gvisor.dev/.../network/ipv4.ReplyToTemporaryEcho` (an `atomic.Bool` in
+    `tun_icmp_echo.go`; the one-line gate is in `icmp.go`, grep **`clashvless`**) — set by `engine.tunUp`
+    (`ReplyToTemporaryEcho.Store(TunICMP())`) and cleared by `tunDown`. gVisor's own echo-reply path builds the
+    reply (spoofing is already on for the source), so no hand-crafted packets. **IPv4 only** — v6 is never
+    routed into the tun (blocked or off-tun). ⚠️ Being a vendored patch, it is **wiped by any `go mod vendor`
+    / xray-core+gVisor bump — re-apply both files afterward** (like `cmd/xhprobe` re-validation).
   Linux and macOS
   are tested and working; **Windows is code-complete but author-untested** (needs `wintun.dll` beside the
   exe). macOS uses a kernel-named `utunN` device and per-service DNS.

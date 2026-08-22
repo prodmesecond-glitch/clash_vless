@@ -10,6 +10,8 @@ import (
 	"sync"
 	"time"
 
+	gvisoripv4 "gvisor.dev/gvisor/pkg/tcpip/network/ipv4" // TUN ICMP-echo toggle (vendored gVisor patch)
+
 	"clashvless/internal/store"
 	"clashvless/internal/tun"
 	"clashvless/internal/xray"
@@ -799,6 +801,11 @@ func (s *Supervisor) tunUp() error {
 	dev := tun.UplinkDevice()
 	bypassLAN := s.cfgBool(func(st *store.State) bool { return st.TunBypassLAN() })
 	blockIPv6 := s.cfgBool(func(st *store.State) bool { return st.TunBlockIPv6() })
+	// The tun netstack answers ICMP echo locally so `ping` works (device liveness
+	// only — ICMP can't traverse the SOCKS/VLESS tunnel; curl tests end-to-end).
+	// A global in the vendored gVisor ipv4 patch, read at packet-dispatch time.
+	icmp := s.cfgBool(func(st *store.State) bool { return st.TunICMP() })
+	gvisoripv4.ReplyToTemporaryEcho.Store(icmp)
 
 	// DNS-direct: reach the resolver off-tun. Linux pins a /32 (see osUp); on
 	// Windows/macOS fold the resolver IP into the per-server bypass list.
@@ -838,14 +845,18 @@ func (s *Supervisor) tunUp() error {
 
 	s.bridge = inst
 	s.tunOn = true
+	icmpWord := "on"
+	if !icmp {
+		icmpWord = "off"
+	}
 	if mark != 0 {
 		bind := dev
 		if bind == "" {
 			bind = "(uplink unknown — fwmark only)"
 		}
-		s.logf("TUN up — all traffic via %s → exit; xray bound to %s + marked 0x%x to stay off-tun", name, bind, mark)
+		s.logf("TUN up — all traffic via %s → exit; xray bound to %s + marked 0x%x to stay off-tun (ping %s)", name, bind, mark, icmpWord)
 	} else {
-		s.logf("TUN up — all traffic via %s → exit (%d server IP(s) bypassed)", name, len(ips))
+		s.logf("TUN up — all traffic via %s → exit (%d server IP(s) bypassed; ping %s)", name, len(ips), icmpWord)
 	}
 
 	// Rebuild the live instance so it's re-created WITH the decoration — its
@@ -860,7 +871,8 @@ func (s *Supervisor) tunDown() {
 		s.tunErr = false
 		return
 	}
-	xray.SetTunMode(0, "", nil) // stop decorating configs
+	xray.SetTunMode(0, "", nil)                    // stop decorating configs
+	gvisoripv4.ReplyToTemporaryEcho.Store(false)   // stop answering ICMP echo
 	_ = s.tunMgr.Down()
 	if s.bridge != nil {
 		_ = s.bridge.Close()

@@ -168,6 +168,7 @@ func run(args []string) error {
 		fmt.Println("  tun dns real-net|static|<ip>|auto   DNS mode (real-net = your LAN resolver off-tun · static routed = via the exit) / set the static resolver")
 		fmt.Println("  tun lan bypass|tunnel   keep private/LAN ranges off the tunnel (default, local-only reachable) or capture them")
 		fmt.Println("  tun ipv6 block|allow    block global IPv6 (default — no v6 leak past the IPv4-only tunnel) or let it escape")
+		fmt.Println("  tun icmp on|off         answer ping locally under TUN (default on; device liveness, not end-to-end)")
 		fmt.Println("  list             show active nodes (two pools)")
 		fmt.Println("  gen [entry]      print the xray config for main, optionally chained via a cached node")
 		fmt.Println("  up [entry]       start xray in-process (chained via [entry] also exposes hop-1 on its own port)")
@@ -580,6 +581,23 @@ func cmdTun(st *store.State, args []string) error {
 		default:
 			return fmt.Errorf("usage: clashvless tun ipv6 block|allow")
 		}
+	case "icmp", "ping":
+		// tun icmp on|off — answer ICMP echo locally (default) so `ping` works
+		if len(args) < 2 {
+			fmt.Printf("TUN ICMP: %s\n", tunICMPLabel(st.TunICMP()))
+			fmt.Println("usage: clashvless tun icmp on | off")
+			return nil
+		}
+		switch v := strings.ToLower(strings.TrimSpace(args[1])); v {
+		case "on", "yes", "reply", "enable":
+			fmt.Println("TUN ICMP → ON (tun stack answers ping locally — device liveness, not end-to-end; use curl for the exit)")
+			return apply(map[string]any{"tun_no_icmp": false}, func(s *store.State) { s.TunNoICMP = false })
+		case "off", "no", "drop", "disable":
+			fmt.Println("TUN ICMP → OFF (ping left unanswered under TUN, as before)")
+			return apply(map[string]any{"tun_no_icmp": true}, func(s *store.State) { s.TunNoICMP = true })
+		default:
+			return fmt.Errorf("usage: clashvless tun icmp on|off")
+		}
 	case "status", "":
 		name := st.TunName
 		if name == "" {
@@ -591,9 +609,10 @@ func cmdTun(st *store.State, args []string) error {
 		fmt.Printf("  dns %s\n", tunDNSDisplay(st))
 		fmt.Printf("  lan %s\n", tunLANLabel(st.TunBypassLAN()))
 		fmt.Printf("  ipv6 %s\n", tunIPv6Label(st.TunBlockIPv6()))
+		fmt.Printf("  icmp %s\n", tunICMPLabel(st.TunICMP()))
 		return nil
 	default:
-		return fmt.Errorf("usage: clashvless tun [on|off|status|dns real-net|static|<ip>|auto|lan bypass|tunnel|ipv6 block|allow]")
+		return fmt.Errorf("usage: clashvless tun [on|off|status|dns real-net|static|<ip>|auto|lan bypass|tunnel|ipv6 block|allow|icmp on|off]")
 	}
 }
 
@@ -603,6 +622,14 @@ func tunIPv6Label(block bool) string {
 		return "block (global v6 fast-fails → apps fall back to the tunneled v4; no leak)"
 	}
 	return "allow (v6 escapes on the real network — NOT covered by the IPv4-only tunnel)"
+}
+
+// tunICMPLabel describes whether the tun stack answers ICMP echo (ping).
+func tunICMPLabel(on bool) string {
+	if on {
+		return "on (tun stack answers ping locally — device liveness only, not end-to-end; use curl for the exit)"
+	}
+	return "off (ping unanswered under TUN — ICMP can't traverse the SOCKS/VLESS tunnel)"
 }
 
 // tunLANLabel describes whether private/LAN ranges bypass the tunnel.

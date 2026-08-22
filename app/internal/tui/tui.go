@@ -465,6 +465,7 @@ var cfgFields = []cfgField{
 	{"TUN DNS", func(st *store.State) int { return b2i(st.TunDNSDirect) }, func(st *store.State, v int) { st.TunDNSDirect = v != 0 }, 0, 1, dnsModeLabel, "real-net = your LAN resolver off-tun · static routed = via the exit"},
 	{"TUN LAN bypass", func(st *store.State) int { return b2i(st.TunBypassLAN()) }, func(st *store.State, v int) { st.TunTunnelLAN = v == 0 }, 0, 1, onOff, "keep private/LAN IPs off the tunnel — local-only resources (intranet, NAS) stay reachable"},
 	{"TUN block IPv6", func(st *store.State) int { return b2i(st.TunBlockIPv6()) }, func(st *store.State, v int) { st.TunAllowIPv6 = v == 0 }, 0, 1, onOff, "block global IPv6 so it can't leak past the IPv4-only tunnel (apps fall back to v4)"},
+	{"TUN ICMP ping", func(st *store.State) int { return b2i(st.TunICMP()) }, func(st *store.State, v int) { st.TunNoICMP = v == 0 }, 0, 1, onOff, "answer ping locally so ping works under TUN — device liveness only (ICMP can't cross the tunnel; use curl for the exit)"},
 	{"Listen port", func(st *store.State) int { return st.ListenPort }, func(st *store.State, v int) { st.ListenPort = v }, 1024, 65535, nil, "restart to apply"},
 	{"Allow LAN (0.0.0.0)", func(st *store.State) int {
 		if st.ListenHost() == "127.0.0.1" {

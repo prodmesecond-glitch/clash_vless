@@ -106,6 +106,11 @@ type State struct {
 	// straight out over v6 and leak the real address (bypassing the exit). Blocking
 	// global-unicast v6 forces fallback to the tunneled v4. true = leave v6 alone.
 	TunAllowIPv6 bool `json:"tun_allow_ipv6"`
+	// TunNoICMP disables answering ICMP echo under TUN. Default false = ICMP ping
+	// ON: the tun netstack replies to echo requests locally so `ping` works (the
+	// SOCKS/VLESS tunnel can't carry ICMP, so this is device liveness, not
+	// end-to-end exit reachability — use curl for that). true = leave ping broken.
+	TunNoICMP bool `json:"tun_no_icmp"`
 
 	// legacy fields, migrated into Subs / Mains on load.
 	LegacyURL       string    `json:"subscription_url,omitempty"`
@@ -121,7 +126,7 @@ type State struct {
 const DefaultUA = "Happ/3.13.0"
 
 // Version is the app version, shown in the TUI header and `version` command.
-const Version = "0.14.1"
+const Version = "0.15.0"
 
 func Dir() (string, error) {
 	base, err := os.UserConfigDir()
@@ -334,6 +339,10 @@ func (s *State) TunBypassLAN() bool { return !s.TunTunnelLAN }
 // TunBlockIPv6 reports whether global-unicast IPv6 is blocked while TUN is up
 // (default true). Inverse of TunAllowIPv6 so the zero value blocks the v6 leak.
 func (s *State) TunBlockIPv6() bool { return !s.TunAllowIPv6 }
+
+// TunICMP reports whether the tun netstack answers ICMP echo so `ping` works
+// (default true). Inverse of TunNoICMP so the zero value enables it.
+func (s *State) TunICMP() bool { return !s.TunNoICMP }
 
 // EntryListenPort is the local SOCKS port the current first hop (entry node) is
 // exposed on while a chained tier (T2/T3) is active. Config 0 = auto (ListenPort+1).
