@@ -12,7 +12,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -179,7 +178,7 @@ type State struct {
 const DefaultUA = "Happ/3.13.0"
 
 // Version is the app version, shown in the TUI header and `version` command.
-const Version = "0.18.0"
+const Version = "0.18.1"
 
 func Dir() (string, error) {
 	base, err := os.UserConfigDir()
@@ -317,16 +316,17 @@ func (s *State) Save() error {
 }
 
 // ReownToInvoker best-effort hands a file/dir the elevated daemon created back to
-// the user who launched it via sudo (SUDO_UID/SUDO_GID), so a rootless
-// `clashvless` can read the state and connect to the control socket. No-op unless
-// running as root under sudo. Errors are ignored (best-effort).
+// the human user it serves, so a rootless `clashvless` can read the state and
+// connect to the control socket. Under `sudo` that's SUDO_UID/SUDO_GID; under a
+// systemd unit (no SUDO_* env) it falls back to the owner of the config tree —
+// see invokerIDs. No-op unless running as root with a non-root target found.
+// Errors are ignored (best-effort).
 func ReownToInvoker(path string) {
 	if os.Geteuid() != 0 {
 		return
 	}
-	uid, err1 := strconv.Atoi(os.Getenv("SUDO_UID"))
-	gid, err2 := strconv.Atoi(os.Getenv("SUDO_GID"))
-	if err1 != nil || err2 != nil || uid == 0 {
+	uid, gid, ok := invokerIDs(path)
+	if !ok || uid == 0 {
 		return
 	}
 	_ = os.Chown(path, uid, gid)

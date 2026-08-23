@@ -16,10 +16,15 @@ or a **system-wide TUN** — with automatic tiered failover.
     `slotRunner` per enabled slot (each = a failover pool on its own port) + the **shared** real-egress
     pool probe, speed loop, and TUN bridge; `publish()` aggregates every runner's `SlotStatus` into `Status`.
   - `internal/control` — daemon↔client IPC over a Unix socket: `run` serves it; `tui`/`status` attach.
-    An **elevated daemon** (`sudo … run`, needed for TUN) hands the control socket **and** the state file
-    back to the invoking user via `store.ReownToInvoker` (chown to `$SUDO_UID/$SUDO_GID`), so a **rootless
-    `clashvless`** attaches instead of falling back to an embedded engine. And `runTUI` no longer deletes a
-    socket it only got `EACCES` on (that used to clobber a live root daemon) — it errors with guidance.
+    An **elevated daemon** (`sudo … run`, or a **systemd unit**, both needed for TUN) hands the control
+    socket **and** the state file back to the human user it serves via `store.ReownToInvoker`, so a
+    **rootless `clashvless`** attaches instead of falling back to an embedded engine. Owner resolution is
+    `store.invokerIDs` (`reown_unix.go`, no-op stub on Windows): prefer `$SUDO_UID/$SUDO_GID` (set by
+    `sudo`), else — under systemd, which sets **no** `SUDO_*` — walk up from the target path to the nearest
+    existing ancestor owned by a non-root user (the config lives under the user's home) and chown to it.
+    Without this, a systemd-run root daemon left `control.sock` root-owned and every rootless attach got
+    `EACCES`. And `runTUI` no longer deletes a socket it only got `EACCES` on (that used to clobber a live
+    root daemon) — it errors with guidance.
   - `internal/tui` — Bubble Tea dashboard client (Status / Subs / Main / Log / Config); `wizard.go`
     is the first-run setup wizard (sub → proxy → HWID → fetch → review → exit, with a non-plain warning).
     The **Main** tab is now a **slots** view: each slot shows its port, on/off, TUN marker (◉) and live tier,
