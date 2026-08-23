@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/url"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -96,8 +97,10 @@ type Supervisor struct {
 	tunOn          bool // OS routing currently applied (bridge may outlive this)
 	tunErr         bool // last bring-up failed; don't respin until toggled off
 	tunErrMsg      string
-	tunSlotName    string // the slot the relay currently targets (for live re-point)
-	tunDevName     string // the device name the bridge created
+	tunMark        int32             // xray's off-tun socket mark (cached for the gateway-change re-point)
+	tunHosts       map[string]string // exit domain→IP map (cached so the re-point re-decorates without DNS)
+	tunSlotName    string            // the slot the relay currently targets (for live re-point)
+	tunDevName     string            // the device name the bridge created
 }
 
 // slotRunner keeps one slot's best main online on the slot's own port. It is the
@@ -962,16 +965,58 @@ func (s *Supervisor) syncTun(ctx context.Context) {
 		s.tunUpOrLatch(ctx, wantSlot, wantPort)
 	case !want && (s.tunOn || s.tunErr):
 		s.tunDownRouting()
-	case want && s.tunOn && wantPort > 0 && (wantSlot != s.tunSlotName || wantPort != s.relayTarget):
-		// The TUN slot (or its port) changed — swap ONLY the local relay behind the
-		// persistent bridge. No device recreation, no routing churn, sub-second blip.
-		if err := s.ensureRelay(wantPort); err != nil {
-			s.logf("TUN: re-point to %q failed: %v", wantSlot, err)
+	case want && s.tunOn:
+		// Already up. If the selected TUN slot (or its port) changed, swap ONLY the
+		// cheap local relay behind the persistent bridge (no device churn). Otherwise
+		// self-heal the OS routing against network events.
+		if wantPort > 0 && (wantSlot != s.tunSlotName || wantPort != s.relayTarget) {
+			if err := s.ensureRelay(wantPort); err != nil {
+				s.logf("TUN: re-point to %q failed: %v", wantSlot, err)
+			} else {
+				s.tunSlotName = wantSlot
+				s.logf("TUN: slot → %q (:%d) — relay swapped, device unchanged", wantSlot, wantPort)
+				s.publish()
+			}
 		} else {
-			s.tunSlotName = wantSlot
-			s.logf("TUN: slot → %q (:%d) — relay swapped, device unchanged", wantSlot, wantPort)
-			s.publish()
+			s.tunReassert(ctx)
 		}
+	}
+}
+
+// tunReassert keeps TUN routing correct against network events while it's up, so
+// the tunnel doesn't silently become a no-op. Runs each cycle; logs only when it
+// actually acts. Two failure modes, cheapest first:
+//   - uplink moved to a NEW network (gateway/dev changed): the bypass routes,
+//     DNS, and xray's own egress binding all point at the dead uplink, so a
+//     routes-only fix won't do — Reapply re-points them in place, then we
+//     re-decorate for the new uplink dev and rebuild every runner so each exit
+//     re-dials over the corrected path (the persistent bridge/device stays put).
+//   - same network, but the default-capture halves got wiped (DHCP renew, Wi-Fi
+//     bounce, sleep/wake): just re-install them in place.
+func (s *Supervisor) tunReassert(ctx context.Context) {
+	if changed, desc := s.tunMgr.GatewayChanged(); changed {
+		s.logf("TUN: uplink changed to %s — re-pointing routes/egress in place (tunnel stays up)", desc)
+		if err := s.tunMgr.Reapply(); err != nil {
+			// Usually the new uplink isn't fully ready yet (no default route) —
+			// leave TUN up and retry next cycle rather than tearing anything down.
+			s.logf("TUN: re-point deferred: %v", err)
+			return
+		}
+		// Refresh xray's egress decoration for the new uplink dev (Linux
+		// SO_BINDTODEVICE; no-op on macOS) with the cached hosts — no DNS — then
+		// rebuild every runner so the exits re-dial over the corrected path.
+		xray.SetTunMode(s.tunMark, tun.UplinkDevice(), s.tunHosts)
+		s.restartRunners(ctx)
+		s.logf("TUN: re-pointed to the new uplink — exits reconnecting")
+		return
+	}
+	repaired, err := s.tunMgr.Reassert()
+	if err != nil {
+		s.logf("TUN: re-assert routes: %v", err)
+		return
+	}
+	if repaired {
+		s.logf("TUN: default-capture routes were missing (a network change wiped them) — reinstalled; traffic back on the tunnel")
 	}
 }
 
@@ -1011,16 +1056,9 @@ func (s *Supervisor) ensureBridge() error {
 	}
 	tun.RemoveDevice(name)
 	tun.WaitForDeviceGone(name, 3*time.Second)
-	var inst *Instance
-	for attempt := 0; attempt < 4; attempt++ {
-		if inst, err = Start(cfg); err == nil {
-			break
-		}
-		time.Sleep(300 * time.Millisecond)
-		tun.RemoveDevice(name)
-	}
+	inst, err := s.startBridge(cfg, name)
 	if err != nil {
-		return fmt.Errorf("start bridge instance (Windows needs wintun.dll next to the exe): %w", err)
+		return err
 	}
 	s.bridge = inst
 	s.tunBackendPort = p
@@ -1118,6 +1156,7 @@ func (s *Supervisor) tunUp(ctx context.Context, tunSlot string, slotPort int) er
 	// plus static hosts. The device bind survives an nftables ruleset stripping the
 	// fwmark (Docker/firewalld), where marked packets would loop back into the tun.
 	xray.SetTunMode(mark, dev, hosts)
+	s.tunMark, s.tunHosts = mark, hosts // cached for the gateway-change re-point (no re-resolve)
 
 	// Create the device once (never recreated in-process), then point the relay at
 	// the selected slot's port.
@@ -1158,6 +1197,32 @@ func (s *Supervisor) tunUp(ctx context.Context, tunSlot string, slotPort int) er
 	// decoration — pre-TUN sockets aren't marked and would loop into the tunnel.
 	s.restartRunners(ctx)
 	return nil
+}
+
+// startBridge starts the bridge (TUN-owning) instance, retrying on a transient
+// "resource busy": after a close the OS may still be releasing the device, so
+// xray's (re)create fails until it's freed. On Linux/Windows RemoveDevice clears
+// a leftover; on macOS the utun is kernel-managed and only the owner's close
+// frees it, so we back off and retry while the kernel catches up. A busy that
+// never clears (another clashvless daemon owns the device) surfaces with a hint.
+func (s *Supervisor) startBridge(cfg []byte, name string) (*Instance, error) {
+	const attempts = 8
+	var err error
+	for i := 0; i < attempts; i++ {
+		var inst *Instance
+		if inst, err = Start(cfg); err == nil {
+			return inst, nil
+		}
+		if !strings.Contains(strings.ToLower(err.Error()), "busy") {
+			return nil, err // not the device race — fail fast
+		}
+		if i == 0 {
+			s.logf("TUN: device %s still releasing — retrying bridge start", name)
+		}
+		tun.RemoveDevice(name)
+		time.Sleep(350 * time.Millisecond)
+	}
+	return nil, fmt.Errorf("%w — is another clashvless daemon already running with TUN on? (device %s stayed busy)", err, name)
 }
 
 // tunDownRouting removes the OS routing/DNS and stops the relay, but KEEPS the

@@ -30,3 +30,9 @@ func (m *Manager) osUp(cfg Config) error {
 }
 
 func (m *Manager) osDown() error { return nil }
+
+func (m *Manager) osReassert() (bool, error) { return false, nil }
+
+func (m *Manager) osGatewayChanged() (bool, string) { return false, "" }
+
+func (m *Manager) osReapply() error { return nil }
