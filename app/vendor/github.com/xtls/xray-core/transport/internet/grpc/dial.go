@@ -2,6 +2,7 @@ package grpc
 
 import (
 	"context"
+	"crypto/sha256"
 	"reflect"
 	"sync"
 	"time"
@@ -22,6 +23,7 @@ import (
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
+	"google.golang.org/protobuf/proto"
 )
 
 func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.MemoryStreamConfig) (stat.Connection, error) {
@@ -38,15 +40,43 @@ func init() {
 	common.Must(internet.RegisterTransportDialer(protocolName, Dial))
 }
 
-type dialerConf struct {
-	net.Destination
-	*internet.MemoryStreamConfig
-}
-
+// clashvless patch (grep clashvless; re-apply after any `go mod vendor`):
+// This cache was keyed by dialerConf{dest, *MemoryStreamConfig} — i.e. by the streamSettings
+// POINTER. clashvless failover probes build a fresh throwaway xray instance (hence a fresh
+// *MemoryStreamConfig) for every probe, so the lookup never hit and every gRPC-node probe
+// created — and stored, but never closed/evicted — a new immortal grpc.ClientConn plus its
+// goroutines, leaking ~GB/day. Key by CONTENT instead so all probes/live dials to the same
+// node collapse onto ONE bounded, reused conn.
 var (
-	globalDialerMap    map[dialerConf]*grpc.ClientConn
+	globalDialerMap    map[string]*grpc.ClientConn
 	globalDialerAccess sync.Mutex
 )
+
+// grpcClientKey hashes everything that makes two gRPC dials equivalent (destination +
+// transport + security + socket settings) so identical configs dedup regardless of which
+// instance/pointer produced them. Distinct nodes hash differently (no cross-node reuse).
+func grpcClientKey(dest net.Destination, s *internet.MemoryStreamConfig) string {
+	sub := func(v interface{}) [sha256.Size]byte {
+		var b []byte
+		if m, ok := v.(proto.Message); ok {
+			b, _ = proto.MarshalOptions{Deterministic: true}.Marshal(m)
+		}
+		return sha256.Sum256(b)
+	}
+	h := sha256.New()
+	d := sha256.Sum256([]byte(dest.String() + "\x00" + s.ProtocolName + "\x00" + s.SecurityType))
+	h.Write(d[:])
+	p := sub(s.ProtocolSettings)
+	h.Write(p[:])
+	sec := sub(s.SecuritySettings)
+	h.Write(sec[:])
+	var so [sha256.Size]byte
+	if s.SocketSettings != nil {
+		so = sub(s.SocketSettings)
+	}
+	h.Write(so[:])
+	return string(h.Sum(nil))
+}
 
 func dialgRPC(ctx context.Context, dest net.Destination, streamSettings *internet.MemoryStreamConfig) (net.Conn, error) {
 	grpcSettings := streamSettings.ProtocolSettings.(*Config)
@@ -79,14 +109,15 @@ func getGrpcClient(ctx context.Context, dest net.Destination, streamSettings *in
 	defer globalDialerAccess.Unlock()
 
 	if globalDialerMap == nil {
-		globalDialerMap = make(map[dialerConf]*grpc.ClientConn)
+		globalDialerMap = make(map[string]*grpc.ClientConn)
 	}
 	tlsConfig := tls.ConfigFromStreamSettings(streamSettings)
 	realityConfig := reality.ConfigFromStreamSettings(streamSettings)
 	sockopt := streamSettings.SocketSettings
 	grpcSettings := streamSettings.ProtocolSettings.(*Config)
 
-	if client, found := globalDialerMap[dialerConf{dest, streamSettings}]; found && client.GetState() != connectivity.Shutdown {
+	key := grpcClientKey(dest, streamSettings)
+	if client, found := globalDialerMap[key]; found && client.GetState() != connectivity.Shutdown {
 		return client, nil
 	}
 
@@ -205,7 +236,7 @@ func getGrpcClient(ctx context.Context, dest net.Destination, streamSettings *in
 		setUserAgent(conn, userAgent)
 		conn.Connect()
 	}
-	globalDialerMap[dialerConf{dest, streamSettings}] = conn
+	globalDialerMap[key] = conn
 	return conn, err
 }
 

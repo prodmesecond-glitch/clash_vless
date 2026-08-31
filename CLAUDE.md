@@ -49,9 +49,13 @@ or a **system-wide TUN** — with automatic tiered failover.
     printing PASS/FAIL. Proves why chaining uses dialerProxy; re-run after any xray-core bump.
   - `cmd/tunprobe` — root/admin-only lab: starts JUST the TUN bridge, confirms xray creates the device,
     then tears down **without touching routing** (safe). Answers "does the native tun inbound work here?".
-- `app/vendor/` — vendored deps (committed; builds are hermetic/offline). Holds **one local patch**
-  (grep `clashvless`): gVisor `network/ipv4` echo-reply gate for TUN ping — see **ICMP ping**. Re-apply after
-  any re-vendor.
+- `app/vendor/` — vendored deps (committed; builds are hermetic/offline). Holds **two local patches**
+  (grep `clashvless`): (1) gVisor `network/ipv4` echo-reply gate for TUN ping — see **ICMP ping**; (2)
+  `transport/internet/grpc/dial.go` **content-keys** the global gRPC client-conn cache. It was keyed by the
+  `*MemoryStreamConfig` **pointer**, so each failover probe (a fresh throwaway instance → fresh pointer) missed
+  the cache and stored a **new, never-closed `grpc.ClientConn`** (+ its goroutines) into an insert-only global
+  map → ~2 GB/day leak with gRPC entry nodes. The patch hashes dest+transport+security+socket settings so all
+  probes/live dials to one node share **one bounded** conn. Re-apply **both** after any re-vendor.
 - `dist/` — prebuilt release binaries (**not committed**; build artifacts).
 
 ## Build & run
@@ -68,6 +72,8 @@ Key commands: `add <url>`, `fetch`, `fetch-proxy [host:port|off]`, `loglevel [le
 `tun [on|off|status|dns <ip>|dns direct|dns tunnel|lan …|ipv6 …|icmp on|off]`, `whoami`. See the default-case
 help block in `main.go`.
 For **TUN mode** the daemon must be elevated: `sudo clashvless run` (then attach the TUI as a client).
+Set `CLASHVLESS_PPROF=127.0.0.1:6060` to expose `net/http/pprof` on the daemon (localhost-only, opt-in)
+for heap/goroutine leak hunts — see the gRPC probe-leak note under `app/vendor/`.
 
 ## Architecture essentials
 - **Topology**: per slot, a local SOCKS inbound → `main` outbound (the final exit).

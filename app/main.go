@@ -13,6 +13,8 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
+	_ "net/http/pprof" // registers /debug/pprof/* on DefaultServeMux (gated by CLASHVLESS_PPROF)
 	"os"
 	"os/signal"
 	"regexp"
@@ -243,6 +245,16 @@ func cmdRun(st *store.State, debug bool) error {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	// Opt-in heap/goroutine profiling for leak hunts. Bind localhost only.
+	if addr := os.Getenv("CLASHVLESS_PPROF"); addr != "" {
+		go func() {
+			fmt.Println("pprof: http://" + addr + "/debug/pprof/")
+			if err := http.ListenAndServe(addr, nil); err != nil {
+				fmt.Fprintln(os.Stderr, "pprof server:", err)
+			}
+		}()
+	}
 
 	hub := control.NewHub()
 	sink := func(l string) { fmt.Println("  ·", l) }
