@@ -26,6 +26,8 @@ type Probe struct {
 	Latency   time.Duration
 	OK        bool
 	Speed     float64 // Mbps from the last speedtest (0 = not yet tested)
+	Flakiness float64 // % of the last hour's reachability probes that FAILED (0 = rock-solid)
+	Samples   int     // probes behind Flakiness in the window (0 = not enough evidence yet)
 }
 
 // SlotStatus is the live failover state of one slot (its own port + best main).
@@ -42,8 +44,10 @@ type SlotStatus struct {
 }
 
 // Status is an immutable snapshot of supervisor state handed to the UI. The
-// top-level Tier/Entry/Main/Egress/Err/Note mirror the TUN slot (the primary),
-// so single-slot views keep working; Slots carries every slot's state.
+// top-level Tier/Entry/Main/Egress/Err/Note mirror the primary slot — the TUN
+// slot while TUN is ON, else the first slot — so single-slot views keep working
+// without a down TUN-designated slot painting the header DOWN while another slot
+// serves; Slots carries every slot's state.
 type Status struct {
 	Tier      int    // 1/2/3 = active tier; 0 = down (TUN slot)
 	Entry     string // entry node name ("" for T1 direct)
@@ -80,6 +84,9 @@ type Supervisor struct {
 
 	speedMu sync.Mutex
 	speeds  map[string]float64 // Mbps by node name, from the rare speed loop
+
+	flakeMu sync.Mutex
+	flakes  map[string][]flakeSample // rolling 1h reachability history by node name (the stability signal)
 
 	runnersMu sync.Mutex
 	runners   map[string]*slotRunner // one failover runner per enabled slot, keyed by name
@@ -585,6 +592,15 @@ func (r *slotRunner) cycle(ctx context.Context) {
 // pinnedCycle serves a specific user-pinned entry node (node → main), bypassing
 // the tier cascade. Missing or unreachable => DOWN (the pin is an explicit
 // choice; unpin in the Subs tab to restore auto).
+//
+// Health is judged off the WARM live socket — the exact path real traffic takes —
+// exactly like the auto cascade does, NOT a cold throwaway probe. A cold 2-hop
+// reality chain routinely misses the timeout on its first packet while the live
+// exit is carrying traffic perfectly; the old code cold-probed every cycle and,
+// on that miss, reported DOWN without ever touching the (still-serving) instance
+// — so the dashboard flapped to "unreachable" while curl through the port worked.
+// Now a cold probe only gates the initial build / a real recovery, with the same
+// downThreshold hysteresis as auto.
 func (r *slotRunner) pinnedCycle(ctx context.Context, hopOB []namedOB, pin string) {
 	if len(hopOB) == 0 {
 		r.emit(0, "", 0, "pinned "+pin+" needs a hop-capable (non-Vision) main — enable one", "")
@@ -596,32 +612,82 @@ func (r *slotRunner) pinnedCycle(ctx context.Context, hopOB []namedOB, pin strin
 		return
 	}
 	m := hopOB[0]
-	lat, up := r.sup.probe(ctx, m.ob, node.Outbound, r.sup.timeout())
-	if !up {
-		r.logf("pinned %s unreachable", pin)
-		r.emit(0, "", 0, "pinned "+pin+" unreachable (unpin for auto)", "")
-		return
-	}
 	tier := 2
 	if node.Whitelist {
 		tier = 3
 	}
+	wantKey := "PIN:" + node.Name
+
+	// Already serving this exact pin? Trust the live socket; re-probe it warm.
+	r.mu.Lock()
+	liveMatches := r.live != nil && r.liveKey == wantKey
+	r.mu.Unlock()
+	if liveMatches {
+		if lat, e := EgressThroughSOCKS(ctx, r.mainPort, r.sup.timeout()); e == nil {
+			r.failStreak = 0
+			r.emit(tier, node.Name, lat, "", "📌 pinned")
+			return
+		}
+		r.failStreak++
+		if r.failStreak < r.sup.downThresh() { // tolerate a transient blip
+			r.logf("pinned %s failing (%d/%d)…", pin, r.failStreak, r.sup.downThresh())
+			r.emit(tier, node.Name, 0, "", fmt.Sprintf("📌 pinned failing (%d/%d)…", r.failStreak, r.sup.downThresh()))
+			return
+		}
+	}
+
+	// Fresh pin, or the live chain has failed past the threshold: cold-probe and
+	// (re)build the serving instance.
+	lat, up := r.sup.probe(ctx, m.ob, node.Outbound, r.sup.timeout())
+	if !up {
+		// The pinned chain can't be built — but if a previously-applied instance is
+		// still carrying traffic (a fallback from before the pin), we are NOT offline.
+		// Report the exit that's ACTUALLY serving, honestly, and keep it — a bare
+		// "DOWN" while curl through the port plainly works is what read as a false
+		// alarm. Truly DOWN only when nothing is serving.
+		r.mu.Lock()
+		haveLive, liveEntry, liveMain, liveTier, prevNote := r.live != nil, r.liveEntry, r.liveMain, r.liveTier, r.ss.Note
+		r.mu.Unlock()
+		if haveLive {
+			if wlat, e := EgressThroughSOCKS(ctx, r.mainPort, r.sup.timeout()); e == nil {
+				via := liveEntry
+				if via == "" {
+					via = liveMain // T1 fallback has no entry; name the main
+				}
+				note := "⚠ pinned " + pin + " down — serving " + via + " instead"
+				if note != prevNote { // log the transition once, not every tick
+					r.logf("pinned %s unreachable — still online via %s", pin, via)
+				}
+				r.emit(liveTier, liveEntry, wlat, "", note)
+				return
+			}
+		}
+		// Distinguish a genuinely dead entry from a reachable entry whose chain just
+		// won't carry THIS main (e.g. a Vision entry mangles a reality main's inner
+		// handshake — see README hop matrix). The old bare "unreachable" lied when the
+		// node answered fine on raw TCP, which is exactly what confused the pin.
+		note := "pinned " + pin + " unreachable (unpin for auto)"
+		if _, e := TCPLatency(node.Server, node.Port, 4*time.Second); e == nil {
+			note = "pinned " + pin + " ok, but no exit via " + m.name + " — try a non-Vision entry (unpin for auto)"
+		}
+		if note != prevNote {
+			r.logf("%s", note)
+		}
+		r.emit(0, "", 0, note, "")
+		return
+	}
+	r.failStreak = 0
 	cfg, err := xray.BuildConfig(r.mainPort, m.ob, node.Outbound, r.entryPort, r.sup.loglevel(), r.sup.listen)
 	if err != nil {
 		r.emit(0, "", 0, err.Error(), "")
 		return
 	}
-	p := plan{tier: tier, entry: &node, main: m.name, config: cfg, egress: lat, key: "PIN:" + node.Name}
-	r.mu.Lock()
-	same := p.key == r.liveKey
-	r.mu.Unlock()
-	if !same {
-		if e := r.apply(p); e != nil {
-			r.emit(0, "", 0, e.Error(), "")
-			return
-		}
-		r.logf("→ pinned %s  egress %dms", node.Name, lat.Milliseconds())
+	p := plan{tier: tier, entry: &node, main: m.name, config: cfg, egress: lat, key: wantKey}
+	if e := r.apply(p); e != nil {
+		r.emit(0, "", 0, e.Error(), "")
+		return
 	}
+	r.logf("→ pinned %s  egress %dms", node.Name, lat.Milliseconds())
 	r.emit(tier, node.Name, lat, "", "📌 pinned")
 }
 
@@ -712,6 +778,77 @@ const (
 	speedBudget      = 8 * time.Second  // per-node download window (past slow-start)
 )
 
+// --- flakiness / stability ---------------------------------------------------
+//
+// Every pool refresh (~20s) reachability-probes each entry node; we keep the last
+// hour of those pass/fail samples per node and turn them into a flakiness % (share
+// that FAILED). It's the leader signal: the cascade now prefers the *most stable*
+// entry over the merely-fastest, because a 40ms node that drops one probe in three
+// is worse to sit behind than a steady 120ms one. Direct-egress probes are the
+// signal (uniform across the pool, one per node per refresh) — not chain probes,
+// which are irregular and would bias toward whatever's currently selected.
+const (
+	flakeWindow     = time.Hour // rolling window behind the flakiness %
+	minStabSamples  = 5         // below this the % is too noisy to rank on → treated as "unknown"
+	stabBucketPct   = 10.0      // rank by 10%-wide stability bands; finer diffs defer to latency
+	unknownFlakePct = 25.0      // stand-in flakiness for under-sampled nodes when ranking (mid-pack)
+)
+
+type flakeSample struct {
+	t  time.Time
+	ok bool
+}
+
+// recordProbe appends one reachability outcome for a node and prunes the window.
+func (s *Supervisor) recordProbe(name string, ok bool) {
+	s.flakeMu.Lock()
+	defer s.flakeMu.Unlock()
+	if s.flakes == nil {
+		s.flakes = map[string][]flakeSample{}
+	}
+	now := time.Now()
+	cut := now.Add(-flakeWindow)
+	hist := append(s.flakes[name], flakeSample{t: now, ok: ok})
+	i := 0
+	for i < len(hist) && hist[i].t.Before(cut) {
+		i++
+	}
+	s.flakes[name] = hist[i:]
+}
+
+// flakiness returns the % of the last hour's probes that failed for a node, and
+// how many samples that's over (0 samples => 0%, treated as "unknown" by callers).
+func (s *Supervisor) flakiness(name string) (pct float64, samples int) {
+	s.flakeMu.Lock()
+	defer s.flakeMu.Unlock()
+	cut := time.Now().Add(-flakeWindow)
+	var total, fails int
+	for _, smp := range s.flakes[name] {
+		if smp.t.Before(cut) {
+			continue
+		}
+		total++
+		if !smp.ok {
+			fails++
+		}
+	}
+	if total == 0 {
+		return 0, 0
+	}
+	return 100 * float64(fails) / float64(total), total
+}
+
+// stabilityBucket is the leader-ranking key (lower = steadier). Under-sampled
+// nodes land mid-pack so a proven-steady node beats them but they beat a proven-
+// flaky one; ties inside a band fall through to latency.
+func (s *Supervisor) stabilityBucket(name string) int {
+	pct, n := s.flakiness(name)
+	if n < minStabSamples {
+		pct = unknownFlakePct
+	}
+	return int(pct / stabBucketPct)
+}
+
 // refreshPools egress-probes both pools (a real 204 straight through each node)
 // concurrently, records fastest-first ordering, and updates the dashboard. The
 // latency is honest — a raw TCP connect just measured reaching the node's edge.
@@ -756,6 +893,7 @@ func (s *Supervisor) rankPool(ctx context.Context, whitelist bool, sem chan stru
 			sem <- struct{}{}
 			defer func() { <-sem }()
 			lat, ok := s.probe(ctx, n.Outbound, nil, poolProbeTimeout) // real 204 through the node
+			s.recordProbe(n.Name, ok)                                  // feeds the rolling flakiness %
 			results[i] = res{n: n, lat: lat, ok: ok}
 		}(i, n)
 	}
@@ -763,13 +901,18 @@ func (s *Supervisor) rankPool(ctx context.Context, whitelist bool, sem chan stru
 
 	probes := make([]Probe, len(results))
 	for i, r := range results {
-		probes[i] = Probe{Name: r.n.Name, Server: r.n.Server, Whitelist: whitelist, Latency: r.lat, OK: r.ok, Speed: s.speedOf(r.n.Name)}
+		pct, ns := s.flakiness(r.n.Name)
+		probes[i] = Probe{Name: r.n.Name, Server: r.n.Server, Whitelist: whitelist, Latency: r.lat, OK: r.ok, Speed: s.speedOf(r.n.Name), Flakiness: pct, Samples: ns}
 	}
 	s.setPool(whitelist, probes)
 
+	// Leader order: reachable first, then steadiest (stability band), then fastest.
 	sort.SliceStable(results, func(a, b int) bool {
 		if results[a].ok != results[b].ok {
 			return results[a].ok
+		}
+		if ba, bb := s.stabilityBucket(results[a].n.Name), s.stabilityBucket(results[b].n.Name); ba != bb {
+			return ba < bb
 		}
 		return results[a].lat < results[b].lat
 	})
@@ -890,7 +1033,10 @@ func (r *slotRunner) snapshot() SlotStatus {
 }
 
 // publish rebuilds the aggregate Status from every runner + the shared pools and
-// fires onChange. The top-level tier/main mirror the TUN slot (the primary).
+// fires onChange. The top-level tier/main mirror the primary slot: the TUN slot
+// while TUN is ON (that's where system traffic goes), else the first slot — so a
+// down TUN-designated slot doesn't paint the whole header ✖ DOWN while the slot
+// the user is actually pointing an app at (e.g. the default :2084) is serving fine.
 func (s *Supervisor) publish() {
 	s.runnersMu.Lock()
 	runners := make([]*slotRunner, 0, len(s.runners))
@@ -901,6 +1047,7 @@ func (s *Supervisor) publish() {
 
 	s.mu.Lock()
 	tunName := s.st.TunSlotName()
+	tunEnabled := s.st.TunEnabled
 	order := map[string]int{}
 	for i := range s.st.Slots {
 		order[s.st.Slots[i].Name] = i
@@ -916,14 +1063,16 @@ func (s *Supervisor) publish() {
 	sort.SliceStable(slots, func(i, j int) bool { return order[slots[i].Name] < order[slots[j].Name] })
 
 	var primary SlotStatus
-	for _, ss := range slots {
-		if ss.IsTun {
-			primary = ss
-			break
+	if tunEnabled { // TUN carries system traffic through its slot — mirror that one
+		for _, ss := range slots {
+			if ss.IsTun {
+				primary = ss
+				break
+			}
 		}
 	}
 	if primary.Name == "" && len(slots) > 0 {
-		primary = slots[0]
+		primary = slots[0] // TUN off (or no tun slot): the first slot is canonical
 	}
 
 	s.mu.Lock()

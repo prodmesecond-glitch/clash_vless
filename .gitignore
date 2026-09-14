@@ -13,3 +13,4 @@ events.log
 # Editor / OS cruft
 *.swp
 .DS_Store
+tmp/

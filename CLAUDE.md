@@ -95,6 +95,51 @@ for heap/goroutine leak hunts — see the gRPC probe-leak note under `app/vendor
   The entry-node pool + real-egress probe are **shared** across slots (on the manager `Supervisor`);
   each slot picks its best entry independently. `Pin*`/`ForceHop` tunables are **global** (apply to
   every slot's cascade) for now.
+  - **Leader = steadiest, then fastest** (`rankPool` sort, `stabilityBucket`): the entry pool is ranked
+    by **stability first, latency second** — a fast entry that drops one probe in three is worse to sit
+    behind than a steady slower one. Every pool refresh (~20s, `refreshPools`) reachability-probes each
+    node; `recordProbe` keeps the **last hour** of pass/fail per node and `flakiness()` turns it into a
+    **flake %** (share that FAILED). Ranking uses 10%-wide stability bands (`stabBucketPct`) so only a
+    *clear* stability gap overrides latency; under-sampled nodes (`< minStabSamples`) sit mid-pack
+    (`unknownFlakePct`) so the pick degrades gracefully to latency-first on a cold start. The flake % is
+    per-node (Country pool = T2, Bypass = T3) and shown in the TUI **Subs** tab: a per-node column plus a
+    per-tier `flakiness 1h: T2 …·N  T3 …·N` summary. Direct-egress probes are the signal (uniform, one
+    per node per refresh) — not chain probes, which are irregular and bias toward the selected entry.
+    Ranking (steadiest, then best ping within the band) only decides the pick at **selection time**; the
+    cycle is then **sticky** — while the live chain stays healthy it does NOT re-rank/re-pick within a
+    tier (it only ever switches *up* a tier, with `upThreshold` hysteresis, or re-picks when the current
+    chain dies). So among equal-stability entries it locks the best-ping one on selection and rides it
+    until it goes dead, rather than churning as pings jitter (deliberately un-clever — "don't optimize
+    everything").
+  - **Pin health = warm live socket, honest fallback** (`pinnedCycle`): a pinned entry (`PinEntry`) is
+    judged off the **live serving socket** — the same path real traffic takes — like the auto cascade, NOT
+    a fresh cold probe each cycle. Two failure modes were conflated into a misleading bare `✖ DOWN`:
+    - **(a) pinned chain alive but cold-probe flaky.** A cold 2-hop reality chain routinely misses the
+      timeout on its first packet while the live exit carries traffic fine; the old code cold-probed every
+      cycle and, on that miss, reported "pinned … unreachable" *without touching the still-serving
+      instance* — dashboard flapped to DOWN while `curl` worked. Now, once serving the pin, health rides
+      the warm `EgressThroughSOCKS` check (cold probe only gates **initial build** / **real recovery**,
+      with `downThreshold` hysteresis) → stays UP.
+    - **(b) pinned node genuinely dead, but a pre-pin instance still serving.** Pinning a dead node
+      (`PinEntry` unreachable — verified in the wild by a raw-TCP timeout to the node's server, i.e. below
+      xray entirely) leaves the *previous* chain carrying traffic (neither old nor new code tears it down).
+      The bare "DOWN" then read as a false alarm because the port plainly works. Now, on a failed pin
+      cold-probe, if the retained live instance still egresses (warm-checked) we report the **exit that's
+      actually serving** — `● T2 <realEntry> → <main>` + note `⚠ pinned X down — serving <realEntry>
+      instead` — instead of `✖ DOWN`. Truly `✖ DOWN` only when **nothing** is serving. It does not
+      re-cascade to *other* entries (the pin is explicit; it freezes the cascade and auto-recovers to the
+      pinned node when it returns) — deliberately un-clever, per "don't optimize everything".
+    - **(c) reachable entry, but the CHAIN can't carry this main.** When nothing is serving, the DOWN note
+      no longer always says "unreachable" — a raw-TCP probe (`TCPLatency`) to the entry's server separates a
+      dead entry (`pinned X unreachable`) from a live entry whose chain just won't carry this slot's main
+      (`pinned X ok, but no exit via <main> — try a non-Vision entry`). The canonical case: pinning a
+      **Vision** entry onto a slot whose only hop main has its **own reality** — Vision splices/pads the
+      stream and mangles the inner handshake (a *plain* main hops through the same Vision entry fine). The
+      old "unreachable" lied — the node answered on raw TCP in ~190ms.
+  - **Primary slot for the header** (`publish`): the top-line CONNECTION status mirrors the **TUN slot while
+    TUN is ON** (that's where system traffic goes), else the **first slot**. Before, it always mirrored the
+    TUN-designated slot, so a down TUN slot (e.g. a Vision-pinned slot whose reality main can't hop) painted
+    the whole header `✖ DOWN` while the default slot the user actually points apps at (`:2084`) was serving.
 - **First-hop port**: only the **default (first) slot** exposes its entry (first hop) on its own
   local SOCKS port — `store.EntryPort`, default `ListenPort+1` — so extra slots never collide on it.
   Ports: default slot `ListenPort` (2084), its hop-1 `+1`, extra slots auto-assigned from `+2` up

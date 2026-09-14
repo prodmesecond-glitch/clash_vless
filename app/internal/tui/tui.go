@@ -692,7 +692,11 @@ func (m *model) subsView() string {
 	if m.st.PinEntry != "" {
 		head += "   " + activeStyle.Render("📌 "+trunc(m.st.PinEntry, 20))
 	}
-	b.WriteString(head + "\n\n")
+	b.WriteString(head + "\n")
+	t2pct, t2n := poolFlake(m.status.Country)
+	t3pct, t3n := poolFlake(m.status.Bypass)
+	b.WriteString("  " + dimStyle.Render("flakiness 1h: ") + flakeLabel("T2", t2pct, t2n) + dimStyle.Render("  ") + flakeLabel("T3", t3pct, t3n) +
+		dimStyle.Render("   — leader = steadiest, then fastest") + "\n\n")
 
 	if len(m.st.Subs) == 0 {
 		b.WriteString(dimStyle.Render("  no subs yet — press ") + keyStyle.Render("a") + dimStyle.Render(" to add one"))
@@ -727,12 +731,24 @@ func (m *model) subsView() string {
 		} else { // node under an expanded sub
 			nd := &m.st.Subs[r.sub].Nodes[r.node]
 			latStr := dimStyle.Render("   —  ")
+			flkStr := dimStyle.Render("      ") // 6-wide, matches "   NNN%"
 			spdStr := ""
 			if p, ok := lat[nd.Name]; ok {
 				if p.OK {
 					latStr = fmt.Sprintf("%5dms", p.Latency.Milliseconds())
 				} else {
 					latStr = badStyle.Render("   ×  ")
+				}
+				if p.Samples > 0 {
+					fs := fmt.Sprintf("  %3.0f%%", p.Flakiness)
+					switch {
+					case p.Flakiness >= 30:
+						flkStr = badStyle.Render(fs)
+					case p.Flakiness >= 10:
+						flkStr = warnStyle.Render(fs)
+					default:
+						flkStr = okStyle.Render(fs)
+					}
 				}
 				if p.Speed > 0 {
 					spdStr = dimStyle.Render(fmt.Sprintf("  %4.0f Mbps", p.Speed))
@@ -744,7 +760,7 @@ func (m *model) subsView() string {
 			}
 			raw := store.OutboundProtoTag(nd.Outbound)
 			tag := protoStyle(raw).Render(fmt.Sprintf("%-13s", raw))
-			b.WriteString(fmt.Sprintf("%s    %s %-24s %s %s%s\n", cur, pinMark, trunc(nd.Name, 24), tag, latStr, spdStr))
+			b.WriteString(fmt.Sprintf("%s    %s %-24s %s %s%s%s\n", cur, pinMark, trunc(nd.Name, 24), tag, latStr, flkStr, spdStr))
 		}
 	}
 	if len(rows) > h {
@@ -774,6 +790,38 @@ func (m *model) subStatus(sb *store.Subscription) string {
 		return dimStyle.Render(fmt.Sprintf("%d nodes · ", len(sb.Nodes))) + okStyle.Render(fmt.Sprintf("%d up", up))
 	}
 	return dimStyle.Render(fmt.Sprintf("%d nodes", len(sb.Nodes)))
+}
+
+// poolFlake averages the last-hour flakiness across a tier's nodes that have
+// enough samples to count, and returns how many nodes that was over.
+func poolFlake(ps []engine.Probe) (pct float64, n int) {
+	var sum float64
+	for _, p := range ps {
+		if p.Samples > 0 {
+			sum += p.Flakiness
+			n++
+		}
+	}
+	if n == 0 {
+		return 0, 0
+	}
+	return sum / float64(n), n
+}
+
+// flakeLabel renders a "T2 8%·12" style tier summary, colored by how flaky it is.
+func flakeLabel(tier string, pct float64, n int) string {
+	if n == 0 {
+		return dimStyle.Render(tier + " —")
+	}
+	body := fmt.Sprintf("%s %.0f%%·%d", tier, pct, n)
+	switch {
+	case pct >= 30:
+		return badStyle.Render(body)
+	case pct >= 10:
+		return warnStyle.Render(body)
+	default:
+		return okStyle.Render(body)
+	}
 }
 
 func (m *model) probeByName() map[string]engine.Probe {
