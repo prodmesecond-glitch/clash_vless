@@ -95,22 +95,26 @@ for heap/goroutine leak hunts — see the gRPC probe-leak note under `app/vendor
   The entry-node pool + real-egress probe are **shared** across slots (on the manager `Supervisor`);
   each slot picks its best entry independently. `Pin*`/`ForceHop` tunables are **global** (apply to
   every slot's cascade) for now.
-  - **Leader = steadiest, then fastest** (`rankPool` sort, `stabilityBucket`): the entry pool is ranked
-    by **stability first, latency second** — a fast entry that drops one probe in three is worse to sit
-    behind than a steady slower one. Every pool refresh (~20s, `refreshPools`) reachability-probes each
-    node; `recordProbe` keeps the **last hour** of pass/fail per node and `flakiness()` turns it into a
-    **flake %** (share that FAILED). Ranking uses 10%-wide stability bands (`stabBucketPct`) so only a
-    *clear* stability gap overrides latency; under-sampled nodes (`< minStabSamples`) sit mid-pack
-    (`unknownFlakePct`) so the pick degrades gracefully to latency-first on a cold start. The flake % is
-    per-node (Country pool = T2, Bypass = T3) and shown in the TUI **Subs** tab: a per-node column plus a
-    per-tier `flakiness 1h: T2 …·N  T3 …·N` summary. Direct-egress probes are the signal (uniform, one
-    per node per refresh) — not chain probes, which are irregular and bias toward the selected entry.
-    Ranking (steadiest, then best ping within the band) only decides the pick at **selection time**; the
-    cycle is then **sticky** — while the live chain stays healthy it does NOT re-rank/re-pick within a
-    tier (it only ever switches *up* a tier, with `upThreshold` hysteresis, or re-picks when the current
-    chain dies). So among equal-stability entries it locks the best-ping one on selection and rides it
-    until it goes dead, rather than churning as pings jitter (deliberately un-clever — "don't optimize
-    everything").
+  - **Leader = steadiest, then fastest throughput** (`rankPool` sort, `stabilityBucket`): the entry pool is
+    ranked by **stability first, then mean throughput, then latency** — a fast entry that drops one probe in
+    three is worse to sit behind than a steady slower one. Every pool refresh (~20s, `refreshPools`)
+    reachability-probes each node; `recordProbe` keeps the **last hour** of pass/fail per node and
+    `flakiness()` turns it into a **flake %** (share that FAILED). Ranking uses 10%-wide stability bands
+    (`stabBucketPct`) so only a *clear* stability gap overrides throughput; under-sampled nodes
+    (`< minStabSamples`) sit mid-pack (`unknownFlakePct`) so the pick degrades gracefully on a cold start.
+    **Within a band the tiebreak is mean throughput** (`meanSpeed`, rolling 1h of the rare speedtest sweep,
+    `speedWindow`), higher wins; **ping (`Latency`) is the fallback only when speed isn't measured for both
+    candidates** (e.g. cold start, before the first sweep). The flake % is per-node (Country pool = T2,
+    Bypass = T3) and shown in the TUI **Subs** tab: a per-node column plus a per-tier
+    `flakiness 1h: T2 …·N  T3 …·N` summary; the Mbps column now shows the **mean**. Direct-egress probes are
+    the signal (uniform, one per node per refresh) — not chain probes, which are irregular and bias toward
+    the selected entry. Ranking only decides the pick at **selection time**; the cycle is then **sticky** —
+    while the live chain stays healthy it does NOT re-rank/re-pick within a tier (it only switches *up* a
+    tier, with `upThreshold` hysteresis, or re-picks when the current chain dies) — so among equal-stability
+    entries it locks the pick and rides it until it dies, not churning as pings jitter. **One exception**
+    (`liveBySpeed`, `speedBacked`): a pick forced onto **ping** because no speedtest had run yet is
+    *provisional* — the first cycle after throughput data lands, it does a single swap to the best-mean-speed
+    entry in its tier, then locks (deliberately un-clever — "don't optimize everything").
   - **Pin health = warm live socket, honest fallback** (`pinnedCycle`): a pinned entry (`PinEntry`) is
     judged off the **live serving socket** — the same path real traffic takes — like the auto cascade, NOT
     a fresh cold probe each cycle. Two failure modes were conflated into a misleading bare `✖ DOWN`:

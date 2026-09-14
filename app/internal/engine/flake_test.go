@@ -2,6 +2,18 @@ package engine
 
 import "testing"
 
+func TestMeanSpeed(t *testing.T) {
+	s := &Supervisor{}
+	if mbps, n := s.meanSpeed("x"); mbps != 0 || n != 0 {
+		t.Fatalf("meanSpeed(unknown) = %g over %d, want 0 over 0", mbps, n)
+	}
+	s.recordSpeed("x", 40)
+	s.recordSpeed("x", 60)
+	if mbps, n := s.meanSpeed("x"); mbps != 50 || n != 2 {
+		t.Fatalf("meanSpeed(x) = %g over %d, want 50 over 2", mbps, n)
+	}
+}
+
 func TestFlakinessAndStabilityBucket(t *testing.T) {
 	s := &Supervisor{}
 

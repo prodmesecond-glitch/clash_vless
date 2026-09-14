@@ -83,7 +83,7 @@ type Supervisor struct {
 	rankedBypass  []*store.Node
 
 	speedMu sync.Mutex
-	speeds  map[string]float64 // Mbps by node name, from the rare speed loop
+	speeds  map[string][]speedSample // rolling 1h throughput samples by node name (rare speed loop)
 
 	flakeMu sync.Mutex
 	flakes  map[string][]flakeSample // rolling 1h reachability history by node name (the stability signal)
@@ -131,8 +131,9 @@ type slotRunner struct {
 	ss        SlotStatus
 
 	// hysteresis counters — only touched from this runner's goroutine.
-	upStreak   int
-	failStreak int
+	upStreak    int
+	failStreak  int
+	liveBySpeed bool // current auto pick is throughput-backed (else a cold-start ping pick, upgraded once speed lands)
 }
 
 type plan struct {
@@ -154,7 +155,7 @@ func NewSupervisor(st *store.State, onChange func(Status), onLog func(string)) *
 		kick:     make(chan struct{}, 1),
 		onChange: onChange,
 		onLog:    onLog,
-		speeds:   map[string]float64{},
+		speeds:   map[string][]speedSample{},
 		runners:  map[string]*slotRunner{},
 	}
 	s.tunMgr = tun.New(s.logf)
@@ -437,7 +438,7 @@ func (s *Supervisor) runSpeeds(ctx context.Context) {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 			if mbps, ok := s.speedProbe(ctx, n.Outbound); ok {
-				s.setSpeed(n.Name, mbps)
+				s.recordSpeed(n.Name, mbps)
 				s.logf("⚡ %s  %.0f Mbps", n.Name, mbps)
 			}
 		}(n)
@@ -466,16 +467,49 @@ func (s *Supervisor) speedProbe(ctx context.Context, ob json.RawMessage) (float6
 	return SpeedThroughSOCKS(ctx, port, speedBudget)
 }
 
-func (s *Supervisor) setSpeed(name string, mbps float64) {
-	s.speedMu.Lock()
-	s.speeds[name] = mbps
-	s.speedMu.Unlock()
+type speedSample struct {
+	t    time.Time
+	mbps float64
 }
 
-func (s *Supervisor) speedOf(name string) float64 {
+// recordSpeed appends one throughput sample for a node and prunes the window.
+func (s *Supervisor) recordSpeed(name string, mbps float64) {
 	s.speedMu.Lock()
 	defer s.speedMu.Unlock()
-	return s.speeds[name]
+	if s.speeds == nil {
+		s.speeds = map[string][]speedSample{}
+	}
+	now := time.Now()
+	cut := now.Add(-speedWindow)
+	hist := append(s.speeds[name], speedSample{t: now, mbps: mbps})
+	i := 0
+	for i < len(hist) && hist[i].t.Before(cut) {
+		i++
+	}
+	s.speeds[name] = hist[i:]
+}
+
+// meanSpeed averages a node's last-hour throughput samples (Mbps) and returns how
+// many samples that's over (0 = not yet measured). It's the within-band leader
+// tiebreak — steadiest first, then FASTEST by mean throughput, ping only as the
+// fallback when speed isn't measured for both candidates.
+func (s *Supervisor) meanSpeed(name string) (mbps float64, samples int) {
+	s.speedMu.Lock()
+	defer s.speedMu.Unlock()
+	cut := time.Now().Add(-speedWindow)
+	var sum float64
+	var n int
+	for _, smp := range s.speeds[name] {
+		if smp.t.Before(cut) {
+			continue
+		}
+		sum += smp.mbps
+		n++
+	}
+	if n == 0 {
+		return 0, 0
+	}
+	return sum / float64(n), n
 }
 
 // Kick forces an immediate re-evaluation, on top of the interval.
@@ -543,6 +577,25 @@ func (r *slotRunner) cycle(ctx context.Context) {
 
 	if hasLive && healthy {
 		r.failStreak = 0
+
+		// One-time throughput upgrade: a pick made ping-only (cold start, before any
+		// speedtest) swaps to the best-throughput entry in its tier the moment speed
+		// data lands — then it's sticky again (never chasing ping/speed jitter).
+		if !r.liveBySpeed && curTier >= 2 {
+			if _, n := r.sup.meanSpeed(curEntry); n > 0 { // this tier's speeds are in
+				if best, ok := r.bestWorking(ctx, directOB, hopOB, curTier, curTier); ok {
+					if best.entry != nil && best.key != r.liveKey && r.apply(best) == nil {
+						r.liveBySpeed = true
+						spd, _ := r.sup.meanSpeed(best.entry.Name)
+						r.logf("⚡ upgraded to best-speed %s (%.0f Mbps)", best.entry.Name, spd)
+						r.emitPlan(best, "⚡ upgraded to best throughput")
+						return
+					}
+					r.liveBySpeed = true // current entry already the best, or swap failed → lock, don't re-probe
+				}
+			}
+		}
+
 		// Only consider switching UP to a strictly better (lower) tier.
 		if curTier > lo {
 			if up, ok := r.bestWorking(ctx, directOB, hopOB, lo, curTier-1); ok {
@@ -550,6 +603,7 @@ func (r *slotRunner) cycle(ctx context.Context) {
 				if r.upStreak >= r.sup.upThresh() {
 					if r.apply(up) == nil {
 						r.upStreak = 0
+						r.liveBySpeed = r.speedBacked(up)
 						r.logf("↑ recovered → %s  egress %dms", up.key, up.egress.Milliseconds())
 						r.emitPlan(up, "↑ recovered to a better tier")
 						return
@@ -576,6 +630,7 @@ func (r *slotRunner) cycle(ctx context.Context) {
 				return
 			}
 			r.failStreak = 0
+			r.liveBySpeed = r.speedBacked(best)
 			r.logf("→ %s  egress %dms", best.key, best.egress.Milliseconds())
 			r.emitPlan(best, "")
 			return
@@ -718,6 +773,17 @@ func namedOutbounds(mains []store.Main) []namedOB {
 	return out
 }
 
+// speedBacked reports whether a plan's entry pick already has throughput data
+// (so it was ranked by speed, not just ping). A T1 direct plan has no entry pool
+// to upgrade against, so it counts as backed.
+func (r *slotRunner) speedBacked(p plan) bool {
+	if p.entry == nil {
+		return true
+	}
+	_, n := r.sup.meanSpeed(p.entry.Name)
+	return n > 0
+}
+
 // bestWorking probes tiers lo..hi top-down and returns the first plan that
 // reaches the internet, using the fastest working main/entry for its tier.
 func (r *slotRunner) bestWorking(ctx context.Context, directOB, hopOB []namedOB, lo, hi int) (plan, bool) {
@@ -776,6 +842,7 @@ const (
 	speedInterval    = 15 * time.Minute // rare auto-speedtest cadence
 	speedConcurrency = 4                // max simultaneous speedtests (heavy)
 	speedBudget      = 8 * time.Second  // per-node download window (past slow-start)
+	speedWindow      = time.Hour        // rolling window behind the mean throughput
 )
 
 // --- flakiness / stability ---------------------------------------------------
@@ -902,11 +969,13 @@ func (s *Supervisor) rankPool(ctx context.Context, whitelist bool, sem chan stru
 	probes := make([]Probe, len(results))
 	for i, r := range results {
 		pct, ns := s.flakiness(r.n.Name)
-		probes[i] = Probe{Name: r.n.Name, Server: r.n.Server, Whitelist: whitelist, Latency: r.lat, OK: r.ok, Speed: s.speedOf(r.n.Name), Flakiness: pct, Samples: ns}
+		spd, _ := s.meanSpeed(r.n.Name)
+		probes[i] = Probe{Name: r.n.Name, Server: r.n.Server, Whitelist: whitelist, Latency: r.lat, OK: r.ok, Speed: spd, Flakiness: pct, Samples: ns}
 	}
 	s.setPool(whitelist, probes)
 
-	// Leader order: reachable first, then steadiest (stability band), then fastest.
+	// Leader order: reachable first, then steadiest (stability band), then FASTEST by
+	// mean throughput — ping is only the tiebreak when speed isn't measured for both.
 	sort.SliceStable(results, func(a, b int) bool {
 		if results[a].ok != results[b].ok {
 			return results[a].ok
@@ -914,7 +983,12 @@ func (s *Supervisor) rankPool(ctx context.Context, whitelist bool, sem chan stru
 		if ba, bb := s.stabilityBucket(results[a].n.Name), s.stabilityBucket(results[b].n.Name); ba != bb {
 			return ba < bb
 		}
-		return results[a].lat < results[b].lat
+		if sa, na := s.meanSpeed(results[a].n.Name); na > 0 {
+			if sb, nb := s.meanSpeed(results[b].n.Name); nb > 0 && sa != sb {
+				return sa > sb // both measured → higher mean speed wins
+			}
+		}
+		return results[a].lat < results[b].lat // else fall back to lowest ping
 	})
 	var out []*store.Node
 	for _, r := range results {
