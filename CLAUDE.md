@@ -205,6 +205,19 @@ for heap/goroutine leak hunts — see the gRPC probe-leak note under `app/vendor
     `SO_BINDTODEVICE`, no-op on mac) and rebuilds every slot runner (`restartRunners`) so each exit re-dials
     over the corrected path (the persistent bridge/relay/device are untouched). If the
     new uplink isn't ready yet (`Reapply` → "no uplink yet") it defers and retries next cycle, leaving TUN up.
+    `Reapply` re-points **routes only**; **DNS is re-applied separately** by `Manager.ReapplyDNS(staticDNS,
+    realNet)` (called right after, per-OS `osReapplyDNS`) because the resolver a new network needs is
+    mode-dependent: **static routed** re-asserts the constant exit resolver onto the OS (a network event can
+    drop the setting; the query rides the tunnel so it's LAN-independent); **real-net** must adopt the NEW
+    network's resolver — the old LAN's is now unreachable — detected clobber-immune via `currentDHCPResolver`
+    (macOS `ipconfig getpacket <dev>` DHCP lease; Linux `resolvectl dns <dev>` per-link view; **not** the
+    `resolv.conf`/service-DNS we overwrote), then it swaps the off-tun resolver bypass (the `/32` on Linux,
+    the folded per-server bypass entry on macOS via `replaceResolverIP` keeping `cfg.ServerIPs` in sync) and
+    the system DNS to it. Can't detect one → keeps the old resolver and logs (suggesting `tun dns static`).
+    Without this, moving networks in real-net mode left DNS pinned to the old network's resolver →
+    `Could not resolve host` while the tunnel itself worked (the `http_proxy` path resolves remotely, so it
+    kept working — that's the tell). `setDNS` now captures the pre-TUN resolver **once** (guarded on
+    `dnsService`/`savedResolv`) so a re-apply doesn't overwrite the restore value with our own.
     **(b) same network, halves wiped** — just re-adds the halves in place. Both automatic; no manual toggle.
     Bring-up itself is also race-hardened: `startBridge` retries on a transient "resource busy" (macOS utun
     still releasing after a quick off→on), surfacing a clear "another daemon already running?" hint if it

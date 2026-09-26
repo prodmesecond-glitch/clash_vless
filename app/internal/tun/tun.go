@@ -154,6 +154,46 @@ func (m *Manager) Reapply() error {
 	return m.osReapply()
 }
 
+// ReapplyDNS re-picks and re-applies the TUN resolver after the machine joined a
+// new network (call it right after Reapply, which has already adopted the new
+// gateway/device). Reapply deliberately leaves DNS alone — the resolver a network
+// needs is mode-dependent and, for real-net, network-specific:
+//   - static routed (direct=false): the query rides the tunnel to the exit, so the
+//     resolver is constant (staticResolver, e.g. 8.8.8.8) — this just re-asserts it
+//     onto the OS (a network event can drop the setting), independent of the LAN.
+//   - real-net (direct=true): the query resolves off-tun on the LOCAL network, so
+//     the old network's resolver is now unreachable — this detects the NEW network's
+//     DHCP resolver (clobber-immune, not via the resolv.conf we overwrote) and swaps
+//     the off-tun resolver bypass + OS DNS to it. If it can't detect one, it keeps
+//     the old resolver and logs (suggesting static mode).
+//
+// No-op when not up. Serialized against Up/Down/Reapply by the same lock.
+func (m *Manager) ReapplyDNS(staticResolver string, direct bool) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.up {
+		return nil
+	}
+	return m.osReapplyDNS(staticResolver, direct)
+}
+
+// replaceResolverIP returns ips with any entry equal to old removed and new
+// appended — keeps Config.ServerIPs (exit IPs + the real-net resolver bypass) in
+// sync when the resolver changes, so a later Reapply reinstalls the right one.
+func replaceResolverIP(ips []net.IP, old, updated string) []net.IP {
+	out := make([]net.IP, 0, len(ips)+1)
+	for _, ip := range ips {
+		if old != "" && ip.String() == old {
+			continue
+		}
+		out = append(out, ip)
+	}
+	if n := net.ParseIP(updated); n != nil {
+		out = append(out, n)
+	}
+	return out
+}
+
 // Down restores routes and DNS. Safe to call when not up.
 func (m *Manager) Down() error {
 	m.mu.Lock()

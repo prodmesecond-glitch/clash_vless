@@ -237,6 +237,26 @@ func (m *Manager) osReapply() error {
 	return err
 }
 
+// osReapplyDNS re-asserts the resolver after a network change. Windows sets DNS
+// statically on the tun adapter itself (so queries always ride the tunnel), so
+// there is no per-network resolver to re-detect — it just re-applies cfg.DNS.
+// Best-effort/untested like the rest of this backend.
+func (m *Manager) osReapplyDNS(staticResolver string, direct bool) error {
+	resolver := staticResolver
+	if resolver == "" {
+		resolver = m.cfg.DNS
+	}
+	if resolver == "" {
+		return nil
+	}
+	m.cfg.DNS, m.cfg.DNSDirect = resolver, direct
+	m.runSoft("netsh", "interface", "ip", "set", "dns", "name="+m.cfg.Name, "static", resolver)
+	return nil
+}
+
+// currentDHCPResolver is unimplemented on Windows (real-net re-detect n/a).
+func currentDHCPResolver(string) string { return "" }
+
 // captureIntact reports whether both default-capture halves are present in the
 // routing table (`route print` shows a 0.0.0.0 and a 128.0.0.0 dest, each with a
 // 128.0.0.0 mask).

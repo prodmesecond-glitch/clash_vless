@@ -298,11 +298,82 @@ func (m *Manager) setDNS(server string) {
 		m.logf("tun: could not find the primary network service; leaving DNS unchanged")
 		return
 	}
-	m.dnsService = svc
-	if out, err := exec.Command("networksetup", "-getdnsservers", svc).Output(); err == nil {
-		m.savedResolv = out // may be "There aren't any DNS Servers set…" — handled on restore
+	// Capture the pre-TUN resolver ONCE (dnsService empty) so a re-apply doesn't
+	// overwrite savedResolv with our own value and corrupt the restore.
+	if m.dnsService == "" {
+		if out, err := exec.Command("networksetup", "-getdnsservers", svc).Output(); err == nil {
+			m.savedResolv = out // may be "There aren't any DNS Servers set…" — handled on restore
+		}
 	}
+	m.dnsService = svc
 	m.runSoft("networksetup", "-setdnsservers", svc, server)
+}
+
+// osReapplyDNS re-applies the resolver for the new network after Reapply adopted
+// the new gateway/device. Static mode re-asserts the constant exit resolver;
+// real-net detects the new network's DHCP resolver and swaps the off-tun bypass
+// (folded into the per-server bypass list on macOS) and the service DNS to it.
+func (m *Manager) osReapplyDNS(staticResolver string, direct bool) error {
+	old := m.cfg.DNS
+	resolver := staticResolver
+	if direct {
+		if r := currentDHCPResolver(m.origDev); r != "" {
+			resolver = r
+		} else {
+			m.logf("tun: real-net DNS — could not detect the new network's resolver; keeping %s (consider `tun dns static`)", old)
+			resolver = old
+		}
+	}
+	if resolver == "" {
+		return nil
+	}
+	if direct && old != resolver {
+		if old != "" && m.bypass[old] {
+			m.delBypass(old)
+			delete(m.bypass, old)
+		}
+		if !m.bypass[resolver] {
+			if err := m.addBypass(resolver); err == nil {
+				m.bypass[resolver] = true
+			}
+		}
+		m.cfg.ServerIPs = replaceResolverIP(m.cfg.ServerIPs, old, resolver)
+	}
+	m.cfg.DNS, m.cfg.DNSDirect = resolver, direct
+	m.setDNS(resolver)
+	if old != resolver {
+		m.logf("tun: DNS re-pointed %s → %s for the new network", old, resolver)
+	}
+	return nil
+}
+
+// currentDHCPResolver returns the DNS server the current DHCP lease on dev hands
+// out, read straight from the lease (`ipconfig getpacket`) so it's immune to the
+// manual service-DNS override TUN installed. "" if none / not DHCP.
+func currentDHCPResolver(dev string) string {
+	out, err := exec.Command("ipconfig", "getpacket", dev).Output()
+	if err != nil {
+		return ""
+	}
+	for _, ln := range strings.Split(string(out), "\n") {
+		if !strings.Contains(ln, "domain_name_server") {
+			continue
+		}
+		// e.g. "domain_name_server (ip_mult): {192.168.1.1, 8.8.8.8}"
+		i, j := strings.IndexByte(ln, '{'), strings.IndexByte(ln, '}')
+		body := ln
+		if i >= 0 && j > i {
+			body = ln[i+1 : j]
+		} else if k := strings.LastIndex(ln, ": "); k >= 0 {
+			body = ln[k+2:] // "domain_name_server (ip): 192.168.1.1"
+		}
+		for _, tok := range strings.FieldsFunc(body, func(r rune) bool { return r == ',' || r == ' ' }) {
+			if ip := net.ParseIP(strings.TrimSpace(tok)); ip != nil && ip.To4() != nil && !ip.IsLoopback() {
+				return ip.String()
+			}
+		}
+	}
+	return ""
 }
 
 func (m *Manager) restoreDNS() {

@@ -1231,9 +1231,17 @@ func (s *Supervisor) tunReassert(ctx context.Context) {
 			s.logf("TUN: re-point deferred: %v", err)
 			return
 		}
+		// Re-pick + re-apply DNS for the new network: static routed re-asserts the
+		// constant exit resolver; real-net adopts the new network's resolver (the old
+		// one is now unreachable). Reapply left DNS alone on purpose (mode-dependent).
+		realNet := s.cfgBool(func(st *store.State) bool { return st.TunDNSDirect })
+		staticDNS := tun.ResolverFor(false, s.cfgStr(func(st *store.State) string { return st.TunStaticDNS }))
+		if err := s.tunMgr.ReapplyDNS(staticDNS, realNet); err != nil {
+			s.logf("TUN: re-apply DNS after uplink change: %v", err)
+		}
 		// Refresh xray's egress decoration for the new uplink dev (Linux
-		// SO_BINDTODEVICE; no-op on macOS) with the cached hosts — no DNS — then
-		// rebuild every runner so the exits re-dial over the corrected path.
+		// SO_BINDTODEVICE; no-op on macOS) with the cached hosts, then rebuild every
+		// runner so the exits re-dial over the corrected path.
 		xray.SetTunMode(s.tunMark, tun.UplinkDevice(), s.tunHosts)
 		s.restartRunners(ctx)
 		s.logf("TUN: re-pointed to the new uplink — exits reconnecting")

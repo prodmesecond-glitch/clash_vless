@@ -335,12 +335,68 @@ func (m *Manager) setDNS(server string) {
 		m.runSoft("resolvectl", "domain", m.cfg.Name, "~.")
 		return
 	}
-	if b, err := os.ReadFile(resolvConf); err == nil {
-		m.savedResolv = b
+	// Capture the pre-TUN resolv.conf ONCE so a re-apply doesn't save our own
+	// clobbered version and corrupt the restore.
+	if m.savedResolv == nil {
+		if b, err := os.ReadFile(resolvConf); err == nil {
+			m.savedResolv = b
+		}
 	}
 	if err := os.WriteFile(resolvConf, []byte("# clashvless TUN\nnameserver "+server+"\n"), 0644); err != nil {
 		m.logf("tun: set DNS: %v", err)
 	}
+}
+
+// osReapplyDNS re-applies the resolver for the new network after Reapply adopted
+// the new gateway/device (osReapply already re-added the DNS-direct /32 for the
+// OLD resolver via the new gateway). Static mode re-asserts the constant exit
+// resolver; real-net detects the new network's DHCP resolver and swaps the
+// off-tun /32 route + system DNS to it.
+func (m *Manager) osReapplyDNS(staticResolver string, direct bool) error {
+	old := m.cfg.DNS
+	resolver := staticResolver
+	if direct {
+		if r := currentDHCPResolver(m.origDev); r != "" {
+			resolver = r
+		} else {
+			m.logf("tun: real-net DNS — could not detect the new network's resolver; keeping %s (consider `tun dns static`)", old)
+			resolver = old
+		}
+	}
+	if resolver == "" {
+		return nil
+	}
+	if direct && old != resolver {
+		if old != "" {
+			m.runSoft("ip", "route", "del", old+"/32", "via", m.origGW, "dev", m.origDev)
+		}
+		m.runSoft("ip", "route", "add", resolver+"/32", "via", m.origGW, "dev", m.origDev)
+	}
+	m.cfg.DNS, m.cfg.DNSDirect = resolver, direct
+	m.setDNS(resolver)
+	if old != resolver {
+		m.logf("tun: DNS re-pointed %s → %s for the new network", old, resolver)
+	}
+	return nil
+}
+
+// currentDHCPResolver returns the DNS server the current network hands out for
+// dev via systemd-resolved's per-link view (`resolvectl dns <dev>`), which keeps
+// the DHCP upstream even after we clobbered the global resolv.conf. "" if none.
+func currentDHCPResolver(dev string) string {
+	if dev == "" {
+		return ""
+	}
+	out, err := exec.Command("resolvectl", "dns", dev).Output()
+	if err != nil {
+		return ""
+	}
+	for _, tok := range strings.Fields(string(out)) {
+		if ip := net.ParseIP(strings.TrimRight(tok, ",")); ip != nil && ip.To4() != nil && !ip.IsLoopback() {
+			return ip.String()
+		}
+	}
+	return ""
 }
 
 func (m *Manager) restoreDNS() {

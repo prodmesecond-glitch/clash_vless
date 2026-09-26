@@ -36,3 +36,7 @@ func (m *Manager) osReassert() (bool, error) { return false, nil }
 func (m *Manager) osGatewayChanged() (bool, string) { return false, "" }
 
 func (m *Manager) osReapply() error { return nil }
+
+func (m *Manager) osReapplyDNS(string, bool) error { return nil }
+
+func currentDHCPResolver(string) string { return "" }
