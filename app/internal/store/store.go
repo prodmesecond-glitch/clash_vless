@@ -120,7 +120,7 @@ type State struct {
 
 	// engine tuning — editable in the TUI config tab (0 = built-in default).
 	ListenPort    int    `json:"listen_port"`
-	EntryPort     int    `json:"entry_port"`  // first-hop local port while chained (0 = auto: ListenPort+1)
+	EntryPort     int    `json:"entry_port"`  // override for the default slot's first-hop port (0 = auto; every slot else exposes its hop on Port+1)
 	ListenAddr    string `json:"listen_addr"` // bind address for local inbound(s); "" = 0.0.0.0 (LAN-reachable)
 	Interval      int    `json:"interval_s"`
 	Timeout       int    `json:"timeout_s"`
@@ -178,7 +178,7 @@ type State struct {
 const DefaultUA = "Happ/3.13.0"
 
 // Version is the app version, shown in the TUI header and `version` command.
-const Version = "0.19.3"
+const Version = "0.20.0"
 
 func Dir() (string, error) {
 	base, err := os.UserConfigDir()
@@ -523,7 +523,8 @@ func (s *State) RemoveSlot(i int) {
 }
 
 // freeSlotPort returns the lowest local port not already claimed by the main
-// port, the entry-hop port, or another slot.
+// port, an entry-hop port, or another slot. Each slot also exposes its first
+// hop on Port+1, so slots are spaced two apart (both p and p+1 must be free).
 func (s *State) freeSlotPort() int {
 	used := map[int]bool{s.ListenPort: true, s.ListenPort + 1: true}
 	if s.EntryPort > 0 {
@@ -531,9 +532,10 @@ func (s *State) freeSlotPort() int {
 	}
 	for i := range s.Slots {
 		used[s.Slots[i].Port] = true
+		used[s.Slots[i].Port+1] = true
 	}
 	for p := s.ListenPort + 2; p < 65535; p++ {
-		if !used[p] {
+		if !used[p] && !used[p+1] {
 			return p
 		}
 	}
@@ -701,6 +703,7 @@ func (s *State) applyDefaults() (changed bool) {
 	for i := range s.Slots {
 		if s.Slots[i].Port > 0 {
 			used[s.Slots[i].Port] = true
+			used[s.Slots[i].Port+1] = true // each slot also reserves its first-hop port
 		}
 	}
 	for i := range s.Slots {
@@ -710,10 +713,10 @@ func (s *State) applyDefaults() (changed bool) {
 		}
 		if s.Slots[i].Port == 0 {
 			p := s.ListenPort + 2
-			for used[p] {
+			for used[p] || used[p+1] {
 				p++
 			}
-			s.Slots[i].Port, used[p] = p, true
+			s.Slots[i].Port, used[p], used[p+1] = p, true, true
 			changed = true
 		}
 	}

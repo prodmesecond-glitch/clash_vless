@@ -336,13 +336,19 @@ func (s *Supervisor) syncRunners(ctx context.Context) {
 }
 
 // slotEntryPortLocked returns the local port a slot exposes its first hop on
-// while chained. Only the default (first) slot exposes it (EntryListenPort), so
-// extra slots never collide on the entry port. Call with s.mu held.
+// while chained. Every slot exposes its first hop on its own port + 1 by
+// default; the default (first) slot honors the explicit global First-hop port
+// override (EntryPort) instead. Slot ports are spaced two apart (freeSlotPort /
+// applyDefaults reserve Port+1) so these never collide. Call with s.mu held.
 func (s *Supervisor) slotEntryPortLocked(sl *store.Slot) int {
-	if len(s.st.Slots) > 0 && s.st.Slots[0].Name == sl.Name {
-		if ep := s.st.EntryListenPort(); ep != sl.Port {
-			return ep
+	if len(s.st.Slots) > 0 && s.st.Slots[0].Name == sl.Name && s.st.EntryPort > 0 {
+		if s.st.EntryPort != sl.Port {
+			return s.st.EntryPort
 		}
+		return 0
+	}
+	if sl.Port > 0 {
+		return sl.Port + 1
 	}
 	return 0
 }

@@ -144,10 +144,14 @@ for heap/goroutine leak hunts — see the gRPC probe-leak note under `app/vendor
     TUN is ON** (that's where system traffic goes), else the **first slot**. Before, it always mirrored the
     TUN-designated slot, so a down TUN slot (e.g. a Vision-pinned slot whose reality main can't hop) painted
     the whole header `✖ DOWN` while the default slot the user actually points apps at (`:2084`) was serving.
-- **First-hop port**: only the **default (first) slot** exposes its entry (first hop) on its own
-  local SOCKS port — `store.EntryPort`, default `ListenPort+1` — so extra slots never collide on it.
-  Ports: default slot `ListenPort` (2084), its hop-1 `+1`, extra slots auto-assigned from `+2` up
-  (`store.freeSlotPort`); egress probes use a throwaway OS-assigned port (`engine.freePort()`).
+- **First-hop port**: **every** slot exposes its entry (first hop) on its **own port + 1** by default
+  (`slotEntryPortLocked` in `engine/supervisor.go`) — so each slot's hop is reachable while a chained
+  tier is active. The **default (first) slot** additionally honors the global `store.EntryPort` config
+  override (Config-tab **First-hop port**, `0` = auto = `ListenPort+1`); other slots always use `Port+1`.
+  Because each slot claims `Port` **and** `Port+1`, slots are **spaced two apart** — `store.freeSlotPort`
+  and `applyDefaults` reserve both and require `p` **and** `p+1` free when assigning. Ports: default slot
+  `ListenPort` (2084) + hop `+1` (2085), extra slots auto-assigned from `+2` up in steps of two
+  (2086+hop 2087, 2088+hop 2089, …); egress probes use a throwaway OS-assigned port (`engine.freePort()`).
 - **Force-hop** (`store.ForceHop`): skip T1 and always route through a hop (tier bounds → 2..3) —
   a quick "is any hop working?" test that keeps the hop-1 port served. `PinTier`/`PinEntry` still override.
 - **Chaining trick** (`xray.BuildConfig`): a chained `main` dials through the entry via outbound
