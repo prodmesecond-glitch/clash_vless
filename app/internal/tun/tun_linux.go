@@ -45,13 +45,19 @@ func RemoveDevice(name string) {
 	}
 }
 
-// SystemResolver returns the resolver the host used before TUN (the first
-// non-loopback IPv4 nameserver in /etc/resolv.conf). This is what DIRECT-mode
-// DNS adopts so queries keep working on the real network — no public default,
-// which a corporate LAN often firewalls. Falls back to systemd-resolved's real
-// upstream (via resolvectl) when resolv.conf is just the 127.0.0.53 stub.
-// Returns "" if none can be determined.
+// SystemResolver returns the resolver of the real local network, which real-net
+// DNS adopts so queries keep working off-tun — no public default, which a
+// corporate LAN often firewalls. It prefers the uplink's per-link DHCP resolver
+// (`resolvectl dns <dev>`) — immune to a resolv.conf we may have already clobbered
+// with our OWN injected resolver (toggling DNS mode while TUN is up; the "real-net
+// → 8.8.8.8, not the LAN gateway" bug) — then falls back to /etc/resolv.conf and
+// systemd-resolved's global upstream. Returns "" if none can be determined.
 func SystemResolver() string {
+	if _, dev, err := defaultRoute(); err == nil && dev != "" {
+		if r := currentDHCPResolver(dev); r != "" {
+			return r
+		}
+	}
 	if b, err := os.ReadFile(resolvConf); err == nil {
 		for _, ln := range strings.Split(string(b), "\n") {
 			f := strings.Fields(ln)

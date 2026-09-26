@@ -39,11 +39,18 @@ func UplinkDevice() string { return "" }
 // startBridge's busy-retry just waits for a stale one to free on its own.
 func RemoveDevice(string) {}
 
-// SystemResolver returns the resolver the host used before TUN (first
-// non-loopback IPv4 nameserver in /etc/resolv.conf, which macOS keeps in sync
-// with the primary service). DIRECT-mode DNS adopts it so queries keep working
-// on the real network. Returns "" if none can be determined.
+// SystemResolver returns the resolver of the real local network, which real-net
+// DNS adopts so queries keep working off-tun. It prefers the uplink's DHCP lease
+// (`ipconfig getpacket`) — immune to a resolv.conf/service DNS we may have already
+// clobbered, e.g. toggling DNS mode while TUN is up, where resolv.conf holds our
+// OWN injected resolver (the "real-net → 8.8.8.8, not the LAN gateway" bug) — and
+// only falls back to /etc/resolv.conf. Returns "" if none can be determined.
 func SystemResolver() string {
+	if _, dev, err := defaultRoute(); err == nil && dev != "" {
+		if r := currentDHCPResolver(dev); r != "" {
+			return r
+		}
+	}
 	b, err := os.ReadFile("/etc/resolv.conf")
 	if err != nil {
 		return ""

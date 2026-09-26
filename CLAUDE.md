@@ -230,10 +230,14 @@ for heap/goroutine leak hunts — see the gRPC probe-leak note under `app/vendor
       Config tab or `tun dns <ip>`, reset with `tun dns auto`). No leak.
     - **`real-net`** (`TunDNSDirect=true`): pins the resolver **off-tun** (`/32` via the real uplink on Linux;
       folded into the per-server bypass on Win/mac) so **domain-named nodes/exits resolve immediately** rather
-      than through a not-yet-up tunnel (the bootstrap deadlock). Has **no public default** — it adopts the host's
-      **pre-TUN system resolver** (`tun.SystemResolver()`: first non-loopback IPv4 in `/etc/resolv.conf`,
-      `resolvectl` fallback for the systemd stub; Linux/macOS only), because a public default like `8.8.8.8` is
-      often firewalled on a corporate LAN and a LAN resolver is unreachable through the exit.
+      than through a not-yet-up tunnel (the bootstrap deadlock). Has **no public default** — it adopts the
+      **real local network's resolver** (`tun.SystemResolver()`), because a public default like `8.8.8.8` is
+      often firewalled on a corporate LAN and a LAN resolver is unreachable through the exit. `SystemResolver()`
+      is **clobber-immune**: it reads the uplink's **DHCP lease** first (`currentDHCPResolver` — macOS `ipconfig
+      getpacket <dev>`, Linux `resolvectl dns <dev>`) and only falls back to `/etc/resolv.conf`/`resolvectl`.
+      Without this it read the resolv.conf **we already overwrote** with our own injected resolver when the DNS
+      mode was toggled while TUN was up — so real-net would re-adopt e.g. `8.8.8.8` and label it "your LAN
+      resolver" instead of the actual gateway (`192.168.1.1`). The DHCP lease is the ground truth regardless.
 
     IPv4 only (IPv6 isn't tunneled) — see IPv6 block. Needs root/admin.
   - **IPv6 block** (`store.TunBlockIPv6()`, default **on**; `TunAllowIPv6`=false; toggle `tun ipv6 block|allow`,
