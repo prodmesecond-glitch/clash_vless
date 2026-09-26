@@ -502,6 +502,8 @@ var cfgFields = []cfgField{
 	{"First-hop port", func(st *store.State) int { return st.EntryPort }, func(st *store.State, v int) { st.EntryPort = v }, 0, 65535, entryPortLabel, "default slot only; 0 = auto (every slot exposes its hop on port+1); restart to apply"},
 	{"Log level", func(st *store.State) int { return logLevelIdx(st.Loglevel()) }, func(st *store.State, v int) { st.LogLevel = logLevels[clamp(v, 0, len(logLevels)-1)] }, 0, 4, logLevelLabel, "xray verbosity; restart daemon to apply"},
 	{"Use fetch proxy", func(st *store.State) int { return b2i(st.UseFetchProxy) }, func(st *store.State, v int) { st.UseFetchProxy = v != 0 }, 0, 1, onOff, "fetch subs via the proxy below"},
+	{"Auto-fetch subs", func(st *store.State) int { return b2i(st.AutoFetch()) }, func(st *store.State, v int) { st.NoAutoFetch = v == 0 }, 0, 1, onOff, "daemon periodically refetches subs so the node set never goes stale"},
+	{"Auto-fetch every (h)", func(st *store.State) int { return eff(st.FetchIntervalH, 24) }, func(st *store.State, v int) { st.FetchIntervalH = v }, 1, 168, nil, "hours between auto-fetches"},
 }
 
 // cfgStrFields are the free-text (string) rows, rendered just past the numeric

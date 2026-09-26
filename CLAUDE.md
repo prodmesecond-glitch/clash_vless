@@ -282,6 +282,15 @@ for heap/goroutine leak hunts — see the gRPC probe-leak note under `app/vendor
   of the reverted v0.8.x didn't change this — the blocker is Vision on the entry, not the mechanism.)
 - **Device identity** (`store.Device`): one stable HWID + Happ User-Agent is reused for
   every fetch so we occupy exactly one panel device slot. Never mint a fresh HWID per fetch.
+- **Auto-fetch** (`store.AutoFetch()`/`AutoFetchInterval()`, `control.Server.autoFetchLoop`): the daemon
+  periodically refetches every subscription so the node set never goes stale — a stale sub keeps probing
+  now-dead servers and misses fresh ones (the "two boxes on one account show different providers / far
+  fewer up" symptom, which was just an old fetch snapshot). Lives in the control server (owns `refetch()`
+  + the hub), runs in **both** `run` and embedded daemons. A coarse 30-min tick calls `maybeAutoFetch`,
+  which refetches all subs only when the **oldest** sub is past the interval (`FetchIntervalH`, default
+  **24h**; a never-fetched sub has a zero time so it always qualifies) — cheap, and self-healing since a
+  box offline for days refetches shortly after start. Toggle + interval live in the Config tab
+  (**Auto-fetch subs** / **Auto-fetch every (h)**); `NoAutoFetch` is inverse so the zero value is ON.
 - **State**: `$XDG_CONFIG_HOME/clash_vless/state.json`, written atomically at 0600 (it holds
   sub tokens + HWID). Lives **outside** the repo — never commit it.
 

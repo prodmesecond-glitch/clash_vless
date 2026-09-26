@@ -90,6 +90,7 @@ func (s *Server) Serve(ctx context.Context, socketPath string) error {
 		ln.Close()
 		_ = os.Remove(socketPath)
 	}()
+	go s.autoFetchLoop(ctx)
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -216,6 +217,55 @@ func (s *Server) refetch() {
 			s.hub.Broadcast(Event{Type: "log", Line: fmt.Sprintf("refetch %s: %v", u.url, u.err)})
 		}
 	}
+}
+
+// autoFetchLoop periodically refetches every subscription so the node set never
+// goes stale (a stale sub keeps probing dead servers and misses fresh ones — the
+// "different providers on two boxes" symptom). It checks on a coarse tick and
+// refetches only when the oldest sub is past AutoFetchInterval, so it's cheap and
+// self-healing: a box that was offline for days refetches shortly after start.
+// Runs in both `run` and embedded daemons; stops with ctx.
+func (s *Server) autoFetchLoop(ctx context.Context) {
+	const checkEvery = 30 * time.Minute
+	t := time.NewTicker(checkEvery)
+	defer t.Stop()
+	for {
+		s.maybeAutoFetch()
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
+}
+
+// maybeAutoFetch refetches all subs when auto-fetch is on and the oldest sub's
+// last successful fetch is past the configured interval (a never-fetched sub has
+// a zero time, so it always qualifies). Silent when there's nothing to do.
+func (s *Server) maybeAutoFetch() {
+	var st store.State
+	_ = json.Unmarshal(s.sup.Snapshot(), &st)
+	if !subsStale(&st, time.Now()) {
+		return
+	}
+	s.hub.Broadcast(Event{Type: "log", Line: "auto-fetch: subscriptions stale, refreshing"})
+	s.refetch()
+}
+
+// subsStale reports whether an automatic refetch is due: auto-fetch is on, there
+// is at least one sub, and the OLDEST sub's last successful fetch is past the
+// interval (a never-fetched sub has a zero time, so it always qualifies).
+func subsStale(st *store.State, now time.Time) bool {
+	if !st.AutoFetch() || len(st.Subs) == 0 {
+		return false
+	}
+	oldest := now
+	for _, sb := range st.Subs {
+		if sb.LastFetch.Before(oldest) {
+			oldest = sb.LastFetch
+		}
+	}
+	return now.Sub(oldest) >= st.AutoFetchInterval()
 }
 
 // --- client side -------------------------------------------------------------

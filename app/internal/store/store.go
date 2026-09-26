@@ -132,6 +132,10 @@ type State struct {
 	FetchProxy    string `json:"fetch_proxy"`     // proxy for subscription fetches (socks5://, http://, or bare host:port=socks5)
 	UseFetchProxy bool   `json:"use_fetch_proxy"` // route fetches through FetchProxy
 	LogLevel      string `json:"log_level"`       // xray verbosity: none|error|warning|info|debug ("" = warning)
+	// Auto-fetch: the daemon periodically refetches every subscription so the node
+	// set never goes stale (a stale sub = dead servers still probed, fresh ones missed).
+	NoAutoFetch    bool `json:"no_auto_fetch"`    // inverse so the zero value keeps auto-fetch ON
+	FetchIntervalH int  `json:"fetch_interval_h"` // hours between auto-fetches (0 = default 24)
 
 	// TUN mode (system-wide capture; Linux + Windows). A separate persistent
 	// "bridge" xray instance (tun inbound → local SOCKS) owns the device, so
@@ -178,7 +182,7 @@ type State struct {
 const DefaultUA = "Happ/3.13.0"
 
 // Version is the app version, shown in the TUI header and `version` command.
-const Version = "0.21.1"
+const Version = "0.22.0"
 
 func Dir() (string, error) {
 	base, err := os.UserConfigDir()
@@ -406,6 +410,20 @@ func (s *State) TunBlockIPv6() bool { return !s.TunAllowIPv6 }
 // TunICMP reports whether the tun netstack answers ICMP echo so `ping` works
 // (default true). Inverse of TunNoICMP so the zero value enables it.
 func (s *State) TunICMP() bool { return !s.TunNoICMP }
+
+// AutoFetch reports whether the daemon periodically refetches subscriptions
+// (default true). Inverse of NoAutoFetch so the zero value enables it.
+func (s *State) AutoFetch() bool { return !s.NoAutoFetch }
+
+// AutoFetchInterval is the gap between automatic subscription refetches
+// (default 24h; config in whole hours, minimum 1h).
+func (s *State) AutoFetchInterval() time.Duration {
+	h := s.FetchIntervalH
+	if h <= 0 {
+		h = 24
+	}
+	return time.Duration(h) * time.Hour
+}
 
 // EntryListenPort is the local SOCKS port the current first hop (entry node) is
 // exposed on while a chained tier (T2/T3) is active. Config 0 = auto (ListenPort+1).
