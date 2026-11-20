@@ -497,3 +497,202 @@ func TestLogArrivalsAreBatched(t *testing.T) {
 		t.Fatal("a record after a flush should schedule the next one")
 	}
 }
+
+func TestCopySubscriptionLink(t *testing.T) {
+	d := routeTestDashboard(t)
+	d.state.Subs = []store.Subscription{
+		{Name: "Alpha sub", URL: "https://alpha.example.com/sub/token123"},
+		{Name: "Beta sub", URL: "https://beta.example.com/sub/token456"},
+	}
+	d.navigate("subscriptions")
+
+	linkBtns := iconButtons(d, "Copy subscription link")
+	qrBtns := iconButtons(d, "Export subscription QR code")
+	if len(linkBtns) != 2 || len(qrBtns) != 2 {
+		t.Fatalf("expected 2 link buttons and 2 qr buttons, got %d and %d", len(linkBtns), len(qrBtns))
+	}
+
+	findActions := findRouteObjects(d.content, func(obj fyne.CanvasObject) bool {
+		hbox, ok := obj.(*fyne.Container)
+		if !ok {
+			return false
+		}
+		linkIdx, qrIdx := -1, -1
+		for i, child := range hbox.Objects {
+			if child == linkBtns[0] {
+				linkIdx = i
+			}
+			if child == qrBtns[0] {
+				qrIdx = i
+			}
+		}
+		if linkIdx >= 0 && qrIdx >= 0 {
+			if linkIdx != qrIdx-1 {
+				t.Fatalf("link button index (%d) is not immediately left of qr button (%d)", linkIdx, qrIdx)
+			}
+			return true
+		}
+		return false
+	})
+	if len(findActions) == 0 {
+		t.Fatal("could not find container holding both link and qr buttons")
+	}
+
+	linkBtns[0].Tapped(nil)
+	if got := d.app.Clipboard().Content(); got != "https://alpha.example.com/sub/token123" {
+		t.Fatalf("clipboard = %q, want https://alpha.example.com/sub/token123", got)
+	}
+	if d.notice.Text != "Subscription link copied" {
+		t.Fatalf("notice = %q, want 'Subscription link copied'", d.notice.Text)
+	}
+
+	linkBtns[1].Tapped(nil)
+	if got := d.app.Clipboard().Content(); got != "https://beta.example.com/sub/token456" {
+		t.Fatalf("clipboard = %q, want https://beta.example.com/sub/token456", got)
+	}
+	if d.notice.Text != "Subscription link copied" {
+		t.Fatalf("notice = %q, want 'Subscription link copied'", d.notice.Text)
+	}
+
+	d.state.Subs = append(d.state.Subs, store.Subscription{Name: "Empty sub", URL: ""})
+	d.render()
+	linkBtns = iconButtons(d, "Copy subscription link")
+	if len(linkBtns) != 3 || !linkBtns[2].Disabled {
+		t.Fatal("button for subscription with empty URL should be disabled")
+	}
+}
+
+func TestSubscriptionQRExportDefaultsToLinkAndAllowsNodes(t *testing.T) {
+	d := routeTestDashboard(t)
+	d.state.Subs = []store.Subscription{
+		{
+			Name:  "Test sub",
+			URL:   "https://example.com/sub/mytoken",
+			Nodes: []store.Node{{Name: "Node A", Raw: linkA}, {Name: "Node B", Raw: linkB}},
+		},
+	}
+	d.navigate("subscriptions")
+
+	qrBtns := iconButtons(d, "Export subscription QR code")
+	if len(qrBtns) != 1 {
+		t.Fatalf("expected 1 qr button, got %d", len(qrBtns))
+	}
+
+	test.Tap(qrBtns[0])
+	if !d.dialogOpen {
+		t.Fatal("export dialog did not open")
+	}
+
+	// 1. By default, it's in Subscription Link mode.
+	tapRouteDialogButton(t, d, "Copy link")
+	if got := d.app.Clipboard().Content(); got != "https://example.com/sub/mytoken" {
+		t.Fatalf("clipboard = %q, want subscription URL", got)
+	}
+	if d.notice.Text != "Link copied" {
+		t.Fatalf("notice = %q, want 'Link copied'", d.notice.Text)
+	}
+
+	// 2. Switch to optional Nodes mode.
+	tapRouteDialogButton(t, d, "Nodes as VLESS (2)")
+	tapRouteDialogButton(t, d, "Copy link")
+	if got := d.app.Clipboard().Content(); got != linkA {
+		t.Fatalf("clipboard = %q, want node A link", got)
+	}
+
+	tapRouteDialogButton(t, d, "Copy all links")
+	if got := d.app.Clipboard().Content(); got != linkA+"\n"+linkB {
+		t.Fatalf("clipboard = %q, want both links", got)
+	}
+
+	// 3. Switch back to Subscription Link mode.
+	tapRouteDialogButton(t, d, "Subscription link")
+	tapRouteDialogButton(t, d, "Copy link")
+	if got := d.app.Clipboard().Content(); got != "https://example.com/sub/mytoken" {
+		t.Fatalf("clipboard = %q, want subscription URL after switching back", got)
+	}
+
+	tapRouteDialogButton(t, d, "Close")
+	if d.dialogOpen {
+		t.Fatal("dialog should be closed")
+	}
+}
+
+func TestExportDialogClosesOnEscape(t *testing.T) {
+	d := routeTestDashboard(t)
+	d.state.Subs = []store.Subscription{
+		{
+			Name:  "Test sub",
+			URL:   "https://example.com/sub/mytoken",
+			Nodes: []store.Node{{Name: "Node A", Raw: linkA}},
+		},
+	}
+	d.navigate("subscriptions")
+
+	qrBtns := iconButtons(d, "Export subscription QR code")
+	if len(qrBtns) != 1 {
+		t.Fatalf("expected 1 qr button, got %d", len(qrBtns))
+	}
+
+	test.Tap(qrBtns[0])
+	if !d.dialogOpen || d.activeDialog == nil {
+		t.Fatal("export dialog did not open")
+	}
+
+	// Pressing Escape should close the subscription export dialog
+	handler := d.window.Canvas().OnTypedKey()
+	if handler == nil {
+		t.Fatal("no OnTypedKey handler registered on canvas")
+	}
+	handler(&fyne.KeyEvent{Name: fyne.KeyEscape})
+
+	if d.dialogOpen || d.activeDialog != nil {
+		t.Fatal("subscription export dialog should close after Escape key press")
+	}
+
+	// Verify standard share export window also closes on Escape
+	d.showShare("Share test", []share.Link{{Name: "test", URL: "vless://example"}}, 0)
+	if !d.dialogOpen || d.activeDialog == nil {
+		t.Fatal("share dialog did not open")
+	}
+
+	handler(&fyne.KeyEvent{Name: fyne.KeyEscape})
+	if d.dialogOpen || d.activeDialog != nil {
+		t.Fatal("share dialog should close after Escape key press")
+	}
+
+	// Pressing Escape when no dialog is open is safe and a no-op
+	handler(&fyne.KeyEvent{Name: fyne.KeyEscape})
+	if d.dialogOpen {
+		t.Fatal("dialog should remain closed")
+	}
+}
+
+func TestHWIDQRExport(t *testing.T) {
+	d := routeTestDashboard(t)
+	d.settingsSection = "Device"
+	d.state.Device.HWID = "test-hwid-1234-5678"
+	d.navigate("settings")
+
+	var qrBtn *widget.Button
+	for _, obj := range findRouteObjects(d.content, func(obj fyne.CanvasObject) bool {
+		b, ok := obj.(*widget.Button)
+		return ok && b.Icon != nil && strings.Contains(b.Icon.Name(), "qr")
+	}) {
+		qrBtn = obj.(*widget.Button)
+		break
+	}
+	if qrBtn == nil {
+		t.Fatal("HWID QR export button not found in Device settings")
+	}
+
+	test.Tap(qrBtn)
+	if !d.dialogOpen || d.activeDialog == nil {
+		t.Fatal("HWID QR export dialog did not open")
+	}
+
+	handler := d.window.Canvas().OnTypedKey()
+	handler(&fyne.KeyEvent{Name: fyne.KeyEscape})
+	if d.dialogOpen || d.activeDialog != nil {
+		t.Fatal("HWID export dialog should close on Escape")
+	}
+}

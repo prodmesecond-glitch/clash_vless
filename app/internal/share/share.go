@@ -149,6 +149,9 @@ func ParseProxyExits(text, defaultScheme string) (links []string, invalid int) {
 type Request struct {
 	Mains         []store.Main    `json:"mains,omitempty"`
 	Nodes         []store.Node    `json:"nodes,omitempty"`
+	Sub           *Link           `json:"sub,omitempty"`
+	Links         []Link          `json:"links,omitempty"`
+	HWID          string          `json:"hwid,omitempty"`
 	Parse         string          `json:"parse,omitempty"`
 	SlotType      string          `json:"slot_type,omitempty"`
 	DefaultScheme string          `json:"default_scheme,omitempty"`
@@ -166,6 +169,7 @@ type Item struct {
 }
 
 type Response struct {
+	Sub     *Item        `json:"sub,omitempty"`
 	Links   []Item       `json:"links"`
 	Skipped int          `json:"skipped,omitempty"`
 	Exits   []store.Main `json:"exits,omitempty"`
@@ -173,30 +177,43 @@ type Response struct {
 	Error   string       `json:"error,omitempty"`
 }
 
+func qrItem(link Link) Item {
+	item := Item{Link: link}
+	if code, err := QR(link.URL); err == nil {
+		var modules strings.Builder
+		modules.Grow(code.Size * code.Size)
+		for y := 0; y < code.Size; y++ {
+			for x := 0; x < code.Size; x++ {
+				if code.Black(x, y) {
+					modules.WriteByte('1')
+				} else {
+					modules.WriteByte('0')
+				}
+			}
+		}
+		item.QR = &Code{Size: code.Size, Modules: modules.String()}
+	}
+	return item
+}
+
 func Handle(request Request) Response {
-	links := make([]Link, 0, len(request.Mains)+len(request.Nodes))
+	links := make([]Link, 0, len(request.Mains)+len(request.Nodes)+len(request.Links)+1)
+	links = append(links, request.Links...)
+	if request.HWID != "" {
+		links = append(links, Link{Name: "Hardware ID", URL: request.HWID})
+	}
 	for _, main := range request.Mains {
 		links = append(links, MainLink(main))
 	}
 	nodes, skipped := NodeLinks(request.Nodes)
 	links = append(links, nodes...)
 	response := Response{Links: make([]Item, len(links)), Skipped: skipped}
+	if request.Sub != nil {
+		sub := qrItem(*request.Sub)
+		response.Sub = &sub
+	}
 	for i, link := range links {
-		response.Links[i] = Item{Link: link}
-		if code, err := QR(link.URL); err == nil {
-			var modules strings.Builder
-			modules.Grow(code.Size * code.Size)
-			for y := 0; y < code.Size; y++ {
-				for x := 0; x < code.Size; x++ {
-					if code.Black(x, y) {
-						modules.WriteByte('1')
-					} else {
-						modules.WriteByte('0')
-					}
-				}
-			}
-			response.Links[i].QR = &Code{Size: code.Size, Modules: modules.String()}
-		}
+		response.Links[i] = qrItem(link)
 	}
 	if request.BuildProxy != nil {
 		formatted, err := xray.FormatProxyURL(*request.BuildProxy)

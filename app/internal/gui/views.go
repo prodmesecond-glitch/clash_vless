@@ -196,13 +196,14 @@ func (d *dashboard) slotPanel(slotIndex int, slot store.Slot, tunSlot string) fy
 	if len(slot.Mains) == 0 {
 		exits = append(exits, muted("No final exits in this slot yet."))
 	}
-	for mainIndex, main := range slot.Mains {
-		exits = append(exits, d.mainRow(slotIndex, mainIndex, len(slot.Mains), main, live))
+	groups := groupMains(slot.Mains)
+	for groupIndex, group := range groups {
+		exits = append(exits, d.mainRow(slotIndex, groupIndex, len(groups), group, live))
 	}
 	exits = append(exits, widget.NewButtonWithIcon("Add final exits", theme.ContentAddIcon(), func() { d.addMain(slotIndex) }))
 	subtitle := "In priority order: the top working exit is used"
-	if len(slot.Mains) > 0 {
-		subtitle = fmt.Sprintf("%d in priority order: the top working exit is used", len(slot.Mains))
+	if len(groups) > 0 {
+		subtitle = fmt.Sprintf("%d in priority order: the top working exit is used", len(groups))
 	}
 	exitCard := panel("", "", inset(container.New(layout.NewCustomPaddedVBoxLayout(2), strong("Final exits"), muted(subtitle)), 0, 6, 0, 0),
 		container.New(layout.NewCustomPaddedVBoxLayout(8), exits...))
@@ -261,9 +262,27 @@ func mainUsage(main store.Main) (text string, usable bool) {
 	return "Hop only", true
 }
 
-func (d *dashboard) mainRow(slotIndex, mainIndex, count int, main store.Main, live engine.SlotStatus) fyne.CanvasObject {
-	active := live.Tier > 0 && !live.HopOnly && live.Main == main.Name
+func (d *dashboard) mainRow(slotIndex, groupIndex, count int, group mainGroup, live engine.SlotStatus) fyne.CanvasObject {
+	main, mainIndex := group.mains[0], group.indices[0]
+	active, enabled, directAllowed := false, 0, 0
+	hosts := make([]string, len(group.mains))
+	links := make([]share.Link, len(group.mains))
+	for i, candidate := range group.mains {
+		active = active || (live.Tier > 0 && !live.HopOnly && live.Main == candidate.Name)
+		if candidate.Enabled {
+			enabled++
+		}
+		if candidate.AllowNoHop {
+			directAllowed++
+		}
+		hosts[i] = mainHost(candidate.URL)
+		links[i] = share.MainLink(candidate)
+	}
+	main.Enabled, main.AllowNoHop = enabled > 0, directAllowed > 0
 	usage, usable := mainUsage(main)
+	if (enabled > 0 && enabled < len(group.mains)) || (directAllowed > 0 && directAllowed < len(group.mains)) {
+		usage = "Mixed settings"
+	}
 
 	badgeColor := colorControl
 	if active {
@@ -271,7 +290,7 @@ func (d *dashboard) mainRow(slotIndex, mainIndex, count int, main store.Main, li
 	}
 	badgeBg := canvas.NewRectangle(badgeColor)
 	badgeBg.CornerRadius = 11
-	number := canvas.NewText(strconv.Itoa(mainIndex+1), colorText)
+	number := canvas.NewText(strconv.Itoa(groupIndex+1), colorText)
 	if active {
 		number.Color = colorBackground
 	}
@@ -300,15 +319,18 @@ func (d *dashboard) mainRow(slotIndex, mainIndex, count int, main store.Main, li
 	} else {
 		tags = append(tags, neutralChip(usage))
 	}
-	meta := container.NewBorder(nil, nil, container.NewHBox(tags...), nil, newFitText(mainHost(main.URL), colorMuted, 12, false))
+	if len(group.mains) > 1 {
+		tags = append(tags, neutralChip(fmt.Sprintf("%d addresses", len(group.mains))))
+	}
+	meta := container.NewBorder(nil, nil, container.NewHBox(tags...), nil, newFitText(strings.Join(hosts, " · "), colorMuted, 12, false))
 
 	up := d.iconButton(theme.MoveUpIcon(), "Raise priority", func() { d.moveMain(slotIndex, mainIndex, -1) })
-	up.Disabled = mainIndex == 0
+	up.Disabled = groupIndex == 0
 	down := d.iconButton(theme.MoveDownIcon(), "Lower priority", func() { d.moveMain(slotIndex, mainIndex, 1) })
-	down.Disabled = mainIndex == count-1
+	down.Disabled = groupIndex == count-1
 	actions := container.NewHBox(up, down,
 		d.iconButton(qrIcon(), "Share link / QR code", func() {
-			d.showShare("Share exit", []share.Link{share.MainLink(main)}, 0)
+			d.showShare("Share exit", links, 0)
 		}),
 		d.iconButton(theme.DocumentCreateIcon(), "Rename exit", func() { d.renameMain(slotIndex, mainIndex) }),
 		d.iconButton(theme.DeleteIcon(), "Delete exit", func() { d.removeMain(slotIndex, mainIndex) }),
@@ -317,11 +339,13 @@ func (d *dashboard) mainRow(slotIndex, mainIndex, count int, main store.Main, li
 	exitEnabled := widget.NewCheck("Enabled", func(on bool) {
 		d.setMainFlag(slotIndex, mainIndex, func(m *store.Main) { m.Enabled = on })
 	})
-	exitEnabled.Checked = main.Enabled
+	exitEnabled.Checked = enabled == len(group.mains)
+	exitEnabled.Partial = enabled > 0 && enabled < len(group.mains)
 	direct := widget.NewCheck("Allow direct (T1)", func(on bool) {
 		d.setMainFlag(slotIndex, mainIndex, func(m *store.Main) { m.AllowNoHop = on })
 	})
-	direct.Checked = main.AllowNoHop
+	direct.Checked = directAllowed == len(group.mains)
+	direct.Partial = directAllowed > 0 && directAllowed < len(group.mains)
 	toggles := inset(container.NewHBox(exitEnabled, direct), 0, 0, -8, 0) // the checkbox's own padding
 
 	info := container.New(layout.NewCustomPaddedVBoxLayout(6), flexRow(title, actions), meta, toggles)

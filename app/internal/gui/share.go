@@ -16,6 +16,7 @@ import (
 	"fyne.io/fyne/v2/widget"
 
 	"clashvless/internal/share"
+	"clashvless/internal/store"
 )
 
 // qrImage renders text as dark modules on white with the standard quiet zone,
@@ -41,12 +42,10 @@ func qrImage(text string) (image.Image, error) {
 	return img, nil
 }
 
-// showShare is a Marzban-style export: a QR code per link with copy actions, and
-// whole-list copies (plain or as a base64 subscription) when there are several.
-func (d *dashboard) showShare(title string, links []share.Link, skipped int) {
+// buildShareCard builds the scrollable view and footer actions for links.
+func (d *dashboard) buildShareCard(links []share.Link, skipped int) fyne.CanvasObject {
 	if len(links) == 0 {
-		d.notify("Nothing to export")
-		return
+		return container.NewCenter(muted("Nothing to export"))
 	}
 	index := 0
 	name := widget.NewLabel("")
@@ -60,7 +59,6 @@ func (d *dashboard) showShare(title string, links []share.Link, skipped int) {
 	qrError := wrappingMuted("")
 	link := widget.NewLabel("")
 	link.Wrapping = fyne.TextWrapBreak
-	link.Selectable = true
 	link.SizeName = theme.SizeNameCaptionText
 	note := wrappingMuted("")
 	note.Importance = widget.WarningImportance
@@ -136,11 +134,72 @@ func (d *dashboard) showShare(title string, links []share.Link, skipped int) {
 	// The actions stay pinned below; only a long link scrolls.
 	scroll := container.NewVScroll(container.NewVBox(body...))
 	bottom := container.NewVBox(footer...)
-	content := container.NewBorder(nil, bottom, nil, nil, scroll)
-	form := dialog.NewCustom(title, "Close", content, d.window)
-	height := scroll.Content.MinSize().Height + bottom.MinSize().Height + 180
-	form.Resize(fitScreen(fyne.NewSize(560, height)))
+	return container.NewBorder(nil, bottom, nil, nil, scroll)
+}
+
+// showShare is a Marzban-style export: a QR code per link with copy actions, and
+// whole-list copies (plain or as a base64 subscription) when there are several.
+func (d *dashboard) showShare(title string, links []share.Link, skipped int) {
+	if len(links) == 0 {
+		d.notify("Nothing to export")
+		return
+	}
+	card := d.buildShareCard(links, skipped)
+	form := dialog.NewCustom(title, "Close", card, d.window)
+	form.Resize(fitScreen(fyne.NewSize(560, 480)))
 	d.showDialog(form)
 }
 
-func qrIcon() fyne.Resource { return brandIcon("qr") }
+// showSubscriptionShare defaults to exporting the subscription URL link via QR code,
+// while preserving nodes export as an optional switch in the dialog.
+func (d *dashboard) showSubscriptionShare(sub store.Subscription) {
+	subLink := share.Link{Name: sub.Name, URL: sub.URL}
+	nodeLinks, skipped := share.NodeLinks(sub.Nodes)
+	if sub.URL == "" && len(nodeLinks) == 0 {
+		d.notify("Nothing to export")
+		return
+	}
+	if sub.URL == "" {
+		d.showShare("Export · "+sub.Name, nodeLinks, skipped)
+		return
+	}
+	if len(nodeLinks) == 0 {
+		d.showShare("Export · "+sub.Name, []share.Link{subLink}, 0)
+		return
+	}
+
+	subCard := d.buildShareCard([]share.Link{subLink}, 0)
+	nodesCard := d.buildShareCard(nodeLinks, skipped)
+
+	cardContainer := container.NewStack(subCard)
+
+	var subBtn, nodesBtn *widget.Button
+	subBtn = widget.NewButton("Subscription link", func() {
+		subBtn.Importance = widget.HighImportance
+		subBtn.Refresh()
+		nodesBtn.Importance = widget.MediumImportance
+		nodesBtn.Refresh()
+		cardContainer.Objects = []fyne.CanvasObject{subCard}
+		cardContainer.Refresh()
+	})
+	subBtn.Importance = widget.HighImportance
+
+	nodesBtn = widget.NewButton(fmt.Sprintf("Nodes as VLESS (%d)", len(nodeLinks)), func() {
+		subBtn.Importance = widget.MediumImportance
+		subBtn.Refresh()
+		nodesBtn.Importance = widget.HighImportance
+		nodesBtn.Refresh()
+		cardContainer.Objects = []fyne.CanvasObject{nodesCard}
+		cardContainer.Refresh()
+	})
+
+	modeBar := container.NewHBox(subBtn, nodesBtn)
+	content := container.NewBorder(container.NewVBox(modeBar, widget.NewSeparator()), nil, nil, nil, cardContainer)
+
+	form := dialog.NewCustom("Export · "+sub.Name, "Close", content, d.window)
+	form.Resize(fitScreen(fyne.NewSize(560, 520)))
+	d.showDialog(form)
+}
+
+func linkIcon() fyne.Resource { return brandIcon("link") }
+func qrIcon() fyne.Resource   { return brandIcon("qr") }

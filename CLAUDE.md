@@ -50,19 +50,29 @@ or a **system-wide TUN** — with automatic tiered failover.
     `tooltipLayer` stacked over the window. It holds only canvas objects, which are never hit targets, so it
     can't steal clicks or hover, and showing a hint doesn't shift the row. A slot is two cards spaced apart, with no
     separator lines: the slot card (title row, a status strip, actions) and a "Final exits" card where each exit is
-    its own bordered card (accent border when in use). Text under names is kept to one line of short tags (`labels.go`):
+    its own bordered card (accent border when in use). Shared `store.MainGroups` groups VLESS links differing only in
+    server hostname/IP and fragment into one final-exit card; UUID, port and all query parameters must match.
+    Query order/escaping is normalized without resolving DNS. Both addresses remain separate `Slot.Mains`
+    candidates for the engine's direct/hopped failover and TUN bypass; existing state needs no migration.
+    GUI cards and engine candidates use the same group priority: all eligible addresses of the first group
+    are tried before the next group within each tier, even if stored addresses are interleaved. Grouping
+    precedes eligibility filtering, so disabling the leading address does not lower its fallback's priority.
+    The card lists all addresses, exports every link and applies rename/delete/toggles/priority to the group;
+    mixed address flags appear indeterminate until changed. Group edits capture URL occurrence counts,
+    update every duplicate once, and reject a changed group membership (including duplicate counts);
+    reordering moves the group together, preserving its address order. Text under names is kept to one line of short tags (`labels.go`):
     a slot shows `slotLiveLine` (a colored state tag such as "T1 Direct · 87 ms", "First hop only", "Down", then the
     route or error) with Port/Hop chips on the right, inside a `tonedBox` tinted by the state; an exit shows its name, then chips for "In use", protocol and
     `mainUsage` ("Direct or hop", "Hop only", red "Unused: Vision needs direct"), then the host. Names and hosts
     use `fitText`, which ellipsizes to the available width. Each exit row shows its priority number,
     raise/lower arrows (reorder = priority), share (QR), rename, and delete.
-    Exit edits go through `mainRef` (slot name + URL), so a confirmation or rename finishing after another client
+    Exit edits go through `mainRef` (slot name + group URLs), so a confirmation or rename finishing after another client
     reordered the exits still hits the right one. "Add final exits" takes several links, one per line, or a base64
     subscription; `Slot.HasMain` skips exits already present, ignoring the `#fragment`, which is only a name (an
     exported link carries the shown name, so re-importing a renamed exit used to duplicate it). **Export** (`share.go`)
     is Marzban-style: a QR per link (`rsc.io/qr`, drawn black-on-white with a
     quiet zone), Copy link, and for lists Copy all links / Copy as subscription (base64). It exists per exit, per slot,
-    per entry node, and per provider. Nodes without a `raw` link go through `xray.OutboundToVLESS`, and any setting a
+    per entry node, per provider, and for Hardware ID (in Settings -> Device). Nodes without a `raw` link go through `xray.OutboundToVLESS`, and any setting a
     link can't carry (e.g. `finalmask`) is named in the dialog. Links, QR encoding, and pasted-link parsing live in
     `internal/share`, shared with Android. Status events rebuild the page at most every
     `statusRenderGap`, and only when the part the page shows changed (`statusKey`). A rebuild between press and
@@ -85,7 +95,7 @@ or a **system-wide TUN** — with automatic tiered failover.
     In use / Pinned / Testing speed beside the name, then latency / Mbps / failure-rate tags, and a pinned node gets an Unpin banner.
     Names next to tags use `titleWithTags`, which shrinks only the name.
   - `internal/share` — exits and entry nodes as VLESS links (`MainLink` puts the shown name in the fragment,
-    `NodeLink`), QR codes, base64 subscriptions, and pasted-exit parsing (`ParseExits`). The hidden `share` command
+    `NodeLink`), HWID export, QR codes, base64 subscriptions, and pasted-exit parsing (`ParseExits`). The hidden `share` command
     (handled in `main.go` before `store.Load`, so it never touches state) reads a JSON `Request` on stdin and writes
     links with QR module strings, or parsed exits; the Android app runs it as a child process (`Exports.java`).
   - `internal/loghub` — structured records (timestamp, severity, module, element, message) shared by CLI, TUI,
@@ -236,11 +246,19 @@ or a **system-wide TUN** — with automatic tiered failover.
   "Down", the route, Port/Hop chips) and 'Selected for VPN'/'Use for VPN' with 'Edit port'; a "Final exits" card
   has Export and one card per exit (priority badge, share/rename/delete icons, chips for "In use", protocol and
   `mainUsage`, the host, Enabled / Allow direct (T1) checkboxes, raise/lower arrows). Exit edits go through
-  `editExit` (slot name + URL against the latest state). "Add final exits" takes several links or a base64
-  subscription. **Providers & nodes** mirrors desktop Subscriptions: provider rows with Active/Not used/Fetch failed
-  tags, counts, `ago`, Use this, export and remove (by URL); entry nodes grouped per provider (`nodeGroups`), folding
+  `editExit` (slot name + URL against the latest state). "Add final exits" takes several links, a base64
+  subscription, or a live QR scan (via "Scan QR" button or inside the add dialog). **Providers & nodes** mirrors desktop Subscriptions: provider rows with Active/Not used/Fetch failed
+  tags, counts, `ago`, Use this, export and remove (by URL), plus "Scan QR" to import subscriptions directly from QR codes; entry nodes grouped per provider (`nodeGroups`), folding
   per URL (`collapsedSubs`, unused providers start folded), live search and Online only that hide rows in place,
-  `sortProbes` (same order as desktop), a pin banner, and node rows with tags, share and Pin. Export dialogs
+  `sortProbes` (same order as desktop), a pin banner, and node rows with tags, share and Pin. Hardware ID supports QR code export and QR scanning in Device identity settings.
+  **QR Scanning** (`QrScanner.java`, backed by embedded ZXing QR reader): in-app camera viewfinder with autofocus, rotation-aware NV21/YUV frame decoding, reticle overlay, and storage image picker fallback.
+  A scan session invalidates queued UI results on dismissal and delivers a successful result once;
+  delivery also checks that the dialog and activity are still live. Camera startup and release are serialized.
+  Image import reads dimensions first, reopens the stream with power-of-two sampling to a maximum 2048-pixel
+  side, and recycles the decoded bitmap. `decodeBitmap` also bounds pixel-copy size for other callers;
+  memory exhaustion produces an error message. Image results retain their original import callback.
+  `ScanImportTest` runs host-side decoder, cancellation, and sampling checks; it does not exercise a physical camera.
+  Export dialogs
   (`showShare`) page through links with a QR code (`Exports.qr`, whole-pixel scaling), Copy link / Copy all links /
   Copy as subscription. QR codes, exported links and parsed exits come from the Go binary's hidden `share` command,
   so Android exports the same text as desktop; a reply arriving after the activity finished is dropped. Status

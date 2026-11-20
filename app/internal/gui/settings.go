@@ -13,6 +13,7 @@ import (
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
+	"clashvless/internal/share"
 	"clashvless/internal/store"
 )
 
@@ -187,7 +188,22 @@ func (d *dashboard) textSetting(name, key, current, placeholder string) fyne.Can
 		d.saveSetting(key, value)
 	})
 	entry.OnSubmitted = func(string) { save.OnTapped() }
-	return settingRow(name, container.NewBorder(nil, nil, nil, save, container.New(&widthLayout{width: 180}, entry)))
+	var actions fyne.CanvasObject = save
+	if key == "device_hwid" {
+		qrBtn := widget.NewButtonWithIcon("", qrIcon(), func() {
+			val := strings.TrimSpace(entry.Text)
+			if val == "" {
+				val = d.state.Device.HWID
+			}
+			if val == "" {
+				d.notify("No HWID configured")
+				return
+			}
+			d.showShare("Export · Hardware ID", []share.Link{{Name: "Hardware ID", URL: val}}, 0)
+		})
+		actions = container.NewHBox(save, qrBtn)
+	}
+	return settingRow(name, container.NewBorder(nil, nil, nil, actions, container.New(&widthLayout{width: 180}, entry)))
 }
 
 func (d *dashboard) selectSetting(name, key, current string, options []string, labels map[string]string) fyne.CanvasObject {

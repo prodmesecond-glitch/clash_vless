@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/driver/desktop"
 	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
@@ -30,6 +32,7 @@ import (
 
 type dashboard struct {
 	dialogOpen      bool
+	activeDialog    dialog.Dialog
 	logRefresh      func() // re-filters the Activity list; only valid while that page is shown
 	pauseLog        bool
 	scroll          *container.Scroll
@@ -159,6 +162,18 @@ func (d *dashboard) buildShell() {
 	main := container.NewBorder(nil, statusBar, nil, nil, d.content)
 	d.tips = newTooltipLayer()
 	d.window.SetContent(container.NewStack(container.NewBorder(nil, nil, sidebar, nil, main), d.tips.layer))
+
+	onKey := func(ev *fyne.KeyEvent) {
+		if ev != nil && ev.Name == fyne.KeyEscape {
+			d.closeDialog()
+		}
+	}
+	if d.window != nil && d.window.Canvas() != nil {
+		d.window.Canvas().SetOnTypedKey(onKey)
+		if dc, ok := d.window.Canvas().(desktop.Canvas); ok {
+			dc.SetOnKeyDown(onKey)
+		}
+	}
 }
 
 func (d *dashboard) addLog(record loghub.Record) {
@@ -419,12 +434,27 @@ func (d *dashboard) confirm(title, message string, apply func()) {
 func (d *dashboard) showDialog(form dialog.Dialog) {
 	// Keep the underlying widget tree stable until the modal releases focus.
 	d.dialogOpen = true
+	d.activeDialog = form
 	d.tips.hide(nil) // the modal covers its button, so MouseOut never comes
+	if d.window != nil && d.window.Canvas() != nil {
+		d.window.Canvas().Unfocus()
+	}
 	form.SetOnClosed(func() {
+		if d.activeDialog == form {
+			d.activeDialog = nil
+		}
 		d.dialogOpen = false
 		d.render()
 	})
 	form.Show()
+}
+
+func (d *dashboard) closeDialog() {
+	if d.activeDialog != nil {
+		dlg := d.activeDialog
+		d.activeDialog = nil
+		dlg.Hide()
+	}
 }
 
 func (d *dashboard) addSubscription() {
@@ -714,11 +744,10 @@ func (d *dashboard) renameSlot(slotIndex int) {
 	})
 }
 
-// mainRef names an exit by slot name and URL, so an action confirmed after
-// another client reordered or removed exits still edits the intended one.
+// Capture every address by URL so a concurrent reorder cannot redirect an edit.
 type mainRef struct {
 	slot string
-	url  string
+	urls []string
 }
 
 func (d *dashboard) mainRef(slotIndex, mainIndex int) (mainRef, bool) {
@@ -729,18 +758,45 @@ func (d *dashboard) mainRef(slotIndex, mainIndex int) (mainRef, bool) {
 	if mainIndex < 0 || mainIndex >= len(mains) {
 		return mainRef{}, false
 	}
-	return mainRef{slot: d.state.Slots[slotIndex].Name, url: mains[mainIndex].URL}, true
+	ref := mainRef{slot: d.state.Slots[slotIndex].Name}
+	key := mainGroupKey(mains[mainIndex].URL)
+	for _, main := range mains {
+		if mainGroupKey(main.URL) == key {
+			ref.urls = append(ref.urls, main.URL)
+		}
+	}
+	return ref, true
 }
 
 // updateMain applies mutate to the referenced exit; false if it no longer exists.
-func (d *dashboard) updateMain(ref mainRef, mutate func(slot *store.Slot, index int)) bool {
+func (d *dashboard) updateMain(ref mainRef, mutate func(slot *store.Slot, indices []int)) bool {
 	slotIndex := d.state.SlotIndexByName(ref.slot)
-	if slotIndex < 0 || d.state.Slots[slotIndex].MainIndex(ref.url) < 0 {
+	var indices []int
+	valid := slotIndex >= 0 && len(ref.urls) > 0
+	if valid {
+		remaining := make(map[string]int)
+		for _, link := range ref.urls {
+			remaining[link]++
+		}
+		key := mainGroupKey(ref.urls[0])
+		for index, main := range d.state.Slots[slotIndex].Mains {
+			if mainGroupKey(main.URL) != key {
+				continue
+			}
+			if remaining[main.URL] == 0 {
+				valid = false
+				break
+			}
+			remaining[main.URL]--
+			indices = append(indices, index)
+		}
+	}
+	if !valid || len(indices) != len(ref.urls) {
 		d.notify("This exit was changed elsewhere; nothing was edited")
 		return false
 	}
 	d.updateSlots(func(slots []store.Slot) {
-		mutate(&slots[slotIndex], slots[slotIndex].MainIndex(ref.url))
+		mutate(&slots[slotIndex], indices)
 	})
 	return true
 }
@@ -752,7 +808,15 @@ func (d *dashboard) removeMain(slotIndex, mainIndex int) {
 	}
 	name := d.state.Slots[slotIndex].Mains[mainIndex].Name
 	d.confirm("Delete exit", "Remove "+name+" from this failover slot?", func() {
-		d.updateMain(ref, func(slot *store.Slot, index int) { slot.RemoveMain(index) })
+		d.updateMain(ref, func(slot *store.Slot, indices []int) {
+			kept := slot.Mains[:0]
+			for i, main := range slot.Mains {
+				if !slices.Contains(indices, i) {
+					kept = append(kept, main)
+				}
+			}
+			slot.Mains = kept
+		})
 	})
 }
 
@@ -761,7 +825,7 @@ func (d *dashboard) moveMain(slotIndex, mainIndex, delta int) {
 	if !ok {
 		return
 	}
-	if d.updateMain(ref, func(slot *store.Slot, index int) { slot.MoveMain(index, index+delta) }) {
+	if d.updateMain(ref, func(slot *store.Slot, indices []int) { moveMainGroup(slot, indices[0], delta) }) {
 		d.notify("Priority updated")
 	}
 }
@@ -777,13 +841,21 @@ func (d *dashboard) renameMain(slotIndex, mainIndex int) {
 			d.notify("Enter an exit name")
 			return
 		}
-		d.updateMain(ref, func(slot *store.Slot, index int) { slot.Mains[index].Name = name })
+		d.updateMain(ref, func(slot *store.Slot, indices []int) {
+			for _, index := range indices {
+				slot.Mains[index].Name = name
+			}
+		})
 	})
 }
 
 func (d *dashboard) setMainFlag(slotIndex, mainIndex int, set func(*store.Main)) {
 	if ref, ok := d.mainRef(slotIndex, mainIndex); ok {
-		d.updateMain(ref, func(slot *store.Slot, index int) { set(&slot.Mains[index]) })
+		d.updateMain(ref, func(slot *store.Slot, indices []int) {
+			for _, index := range indices {
+				set(&slot.Mains[index])
+			}
+		})
 	}
 }
 

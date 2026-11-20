@@ -123,11 +123,22 @@ func (d *dashboard) providersPanel() fyne.CanvasObject {
 				d.patch(map[string]any{"auto_select": false, "active_sub": index})
 			}))
 		}
+		copyLinkBtn := d.iconButton(linkIcon(), "Copy subscription link", func() {
+			if sub.URL == "" {
+				d.notify("Subscription has no URL")
+				return
+			}
+			d.app.Clipboard().SetContent(sub.URL)
+			d.notify("Subscription link copied")
+		})
+		copyLinkBtn.Disabled = sub.URL == ""
+		qrBtn := d.iconButton(qrIcon(), "Export subscription QR code", func() {
+			d.showSubscriptionShare(sub)
+		})
+		qrBtn.Disabled = sub.URL == "" && len(sub.Nodes) == 0
 		buttons = append(buttons,
-			d.iconButton(qrIcon(), "Export nodes as VLESS links", func() {
-				links, skipped := share.NodeLinks(sub.Nodes)
-				d.showShare("Export · "+sub.Name, links, skipped)
-			}),
+			copyLinkBtn,
+			qrBtn,
 			d.iconButton(theme.DeleteIcon(), "Remove subscription", func() {
 				d.confirm("Remove subscription", "Remove "+sub.Name+" and its cached nodes?", func() {
 					// Remove by URL: another client may have removed an earlier subscription meanwhile.

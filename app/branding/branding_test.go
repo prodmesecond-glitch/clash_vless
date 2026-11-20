@@ -55,10 +55,12 @@ func TestSharedAssets(t *testing.T) {
 	if err != nil || len(windowsIcon) < 6 || windowsIcon[4] != 7 {
 		t.Fatalf("multi-resolution Windows icon: %v", err)
 	}
-	for _, name := range []string{"overview", "subscriptions", "routes", "activity", "settings", "refresh", "copy", "add", "delete"} {
+	for _, name := range []string{"overview", "subscriptions", "routes", "activity", "settings", "refresh", "copy", "add", "delete", "qr", "link"} {
 		if icon, err := Icon(name); err != nil || len(icon) == 0 {
 			t.Errorf("SVG icon %s: %v", name, err)
 		}
+	}
+	for _, name := range []string{"overview", "subscriptions", "routes", "activity", "settings", "refresh", "copy", "add", "delete"} {
 		if icon, err := PNG(name); err != nil || len(icon) == 0 {
 			t.Errorf("PNG icon %s: %v", name, err)
 		}

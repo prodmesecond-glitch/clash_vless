@@ -15,6 +15,7 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/lang"
 	"fyne.io/fyne/v2/test"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
@@ -40,7 +41,7 @@ func routeTestDashboard(t *testing.T) *dashboard {
 func routesDashboard(t *testing.T) (*dashboard, <-chan control.Command) {
 	t.Helper()
 	d := routeTestDashboard(t)
-	sock := filepath.Join(t.TempDir(), "control.sock")
+	sock := filepath.Join(t.TempDir(), "c.sock")
 	ln, err := control.Listen(sock)
 	if err != nil {
 		t.Fatal(err)
@@ -119,6 +120,9 @@ func routeDialogEntry(t *testing.T, d *dashboard) *widget.Entry {
 
 func tapRouteDialogButton(t *testing.T, d *dashboard, label string) {
 	t.Helper()
+	if label == "Yes" || label == "No" {
+		label = lang.L(label)
+	}
 	buttons := findRouteObjects(d.window.Canvas().Overlays().Top(), func(obj fyne.CanvasObject) bool {
 		button, ok := obj.(*widget.Button)
 		return ok && button.Text == label

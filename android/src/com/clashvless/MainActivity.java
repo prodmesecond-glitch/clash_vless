@@ -1,11 +1,13 @@
 package com.clashvless;
 
+import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.Dialog;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.content.res.ColorStateList;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
@@ -15,6 +17,7 @@ import android.graphics.drawable.BitmapDrawable;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.RippleDrawable;
+import android.net.Uri;
 import android.net.VpnService;
 import android.os.Build;
 import android.os.Bundle;
@@ -23,6 +26,7 @@ import android.text.InputType;
 import android.text.TextUtils;
 import android.text.TextWatcher;
 import android.view.Gravity;
+import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
@@ -51,6 +55,10 @@ import java.util.function.IntConsumer;
 
 /** Native Android dashboard over the same daemon protocol as desktop. */
 public class MainActivity extends Activity {
+    private static final int REQ_CAMERA_PERMISSION = 3001;
+    private Consumer<String> pendingScanCallback;
+    private String pendingScanTitle;
+
     static final String ACTION_CONNECT = "com.clashvless.CONNECT";
     private static final String[] TABS = {"Settings", "Overview", "Log"};
     private static final String[] ICONS = {"settings", "overview", "activity"};
@@ -478,7 +486,7 @@ public class MainActivity extends Activity {
         refresh.setEnabled(count > 0);
         if (count == 0) refresh.setAlpha(0.4f);
         providers.addView(spacer(8));
-        providers.addView(equalRow(btn("Add subscription", true, this::addSub), refresh));
+        providers.addView(equalRow(btn("Add subscription", true, this::addSub), btn("Scan QR", false, this::scanSubQR), refresh));
         if (count > 1) providers.addView(toggle("Use nodes from all providers", combined, on -> Ctl.patch("auto_select", on)));
         if (count == 0) providers.addView(text("No subscriptions yet. Add a subscription URL to get entry nodes for hopped routes (T2/T3).", 12, MUTED, false));
         Set<String> online = new HashSet<>();
@@ -525,8 +533,17 @@ public class MainActivity extends Activity {
         }
         actions.addView(new View(this), new LinearLayout.LayoutParams(0, 1, 1));
         String name = sub.optString("name"), url = sub.optString("url");
-        actions.addView(icon(R.drawable.clashvless_qr, "Export nodes as VLESS links", total > 0, () -> {
-            try { Exports.call(this, new JSONObject().put("nodes", nodes), response -> showShare("Export | " + name, response)); } catch (Exception e) { failed(e); }
+        actions.addView(icon(R.drawable.clashvless_link, "Copy subscription link", !url.isEmpty(), () -> {
+            copy("Subscription link", url, "Subscription link copied");
+        }));
+        boolean canExport = !url.isEmpty() || total > 0;
+        actions.addView(icon(R.drawable.clashvless_qr, "Export subscription QR code", canExport, () -> {
+            try {
+                JSONObject req = new JSONObject();
+                if (!url.isEmpty()) req.put("sub", new JSONObject().put("name", name).put("url", url));
+                if (nodes != null && nodes.length() > 0) req.put("nodes", nodes);
+                Exports.call(this, req, response -> showShare("Export | " + name, response));
+            } catch (Exception e) { failed(e); }
         }));
         actions.addView(icon(R.drawable.clashvless_delete, "Remove subscription", true, () -> confirm("Remove " + name + " and its cached nodes?", () -> {
             // By URL: another client may have removed an earlier subscription meanwhile.
@@ -1199,10 +1216,10 @@ public class MainActivity extends Activity {
         if (count == 0) card.addView(text("No final exits in this slot yet.", 12, MUTED, false), topMargin(8));
         for (int m = 0; m < count; m++) card.addView(exitCard(slotName, mains.optJSONObject(m), m, count, live), topMargin(8));
         boolean isProxy = "proxy".equals(sl.optString("type"));
-        card.addView(btn("Add final exits", true, () -> {
-            if (isProxy) addProxyExits(slotName);
-            else addExits(slotName);
-        }), topMargin(10));
+        card.addView(equalRow(
+                btn("Add final exits", true, () -> { if (isProxy) addProxyExits(slotName); else addExits(slotName); }),
+                btn("Scan QR", false, () -> scanExitsQR(slotName))
+        ), topMargin(10));
         return card;
     }
 
@@ -1497,24 +1514,63 @@ public class MainActivity extends Activity {
 
     /** Takes several links, one per line, or a base64 subscription; the Go side validates and names them. */
     private void addExits(String slotName) {
-        askLines("Add final exits", "vless://... one per line, or a base64 subscription", value -> {
-            try {
-                Exports.call(this, new JSONObject().put("parse", value),
-                        response -> mergeParsedExits(slotName, response, "Enter at least one valid vless:// link", null));
-            } catch (Exception e) { failed(e); }
+        askLines("Add final exits", "vless://... one per line, or a base64 subscription", () -> scanExitsQR(slotName), value -> {
+            importExitsToSlot(slotName, value);
         });
+    }
+
+    private void scanExitsQR(String slotName) {
+        scanQR("Scan exit route QR (" + slotName + ")", text -> importExitsToSlot(slotName, text));
+    }
+
+    private void importExitsToSlot(String slotName, String value) {
+        value = value.trim();
+        JSONObject targetSlot = findSlot(slotName);
+        boolean isProxy = targetSlot != null && "proxy".equals(targetSlot.optString("type"));
+        if (isProxy) {
+            try {
+                JSONObject req = new JSONObject().put("parse", value).put("slot_type", "proxy").put("default_scheme", "socks5");
+                Exports.call(this, req, response -> mergeParsedExits(slotName, response, "No valid HTTP/SOCKS5 proxies found", null));
+            } catch (Exception e) { failed(e); }
+            return;
+        }
+        if (value.startsWith("http://") || value.startsWith("https://")) {
+            String subUrl = value;
+            confirm("Scanned a subscription URL. Add it to subscriptions instead?", () -> {
+                if (Ctl.cmd("addsub", "url", subUrl)) fetching("adding subscription");
+                toast("Subscription added");
+            });
+            return;
+        }
+        try {
+            Exports.call(this, new JSONObject().put("parse", value),
+                    response -> mergeParsedExits(slotName, response, "No valid vless:// links found", null));
+        } catch (Exception e) { failed(e); }
     }
 
     /** Marzban-style export: a QR code per link with copy actions, and whole-list copies when there are several. */
     private void showShare(String title, JSONObject response) {
-        JSONArray links = response.optJSONArray("links");
+        JSONObject subItem = response.optJSONObject("sub");
+        JSONArray nodeLinks = response.optJSONArray("links");
         int skipped = response.optInt("skipped");
-        if (links == null || links.length() == 0) {
+        if (subItem == null && (nodeLinks == null || nodeLinks.length() == 0)) {
             toast(skipped > 0 ? "Only VLESS nodes can be exported" : "Nothing to export");
             return;
         }
+        JSONArray subLinks = subItem != null ? new JSONArray().put(subItem) : null;
+        boolean hasBoth = subLinks != null && nodeLinks != null && nodeLinks.length() > 0;
+        final JSONArray[] currentLinks = {subLinks != null ? subLinks : nodeLinks};
+        final boolean[] inNodesMode = {subLinks == null};
+
         Dialog dialog = new Dialog(this);
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+        dialog.setOnKeyListener((d, keyCode, event) -> {
+            if (keyCode == KeyEvent.KEYCODE_ESCAPE && event.getAction() == KeyEvent.ACTION_UP) {
+                dialog.dismiss();
+                return true;
+            }
+            return false;
+        });
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setPadding(dp(18), dp(16), dp(18), dp(14));
@@ -1522,6 +1578,15 @@ public class MainActivity extends Activity {
         bg.setStroke(dp(1), BORDER);
         root.setBackground(bg);
         root.addView(oneLine(title, 16, TEXT, true));
+
+        int dialogWidth = Math.min((int) (getResources().getDisplayMetrics().widthPixels * 0.92f), dp(400));
+        int qrSide = Math.min(dialogWidth - dp(36), dp(280));
+
+        int[] index = {0};
+        Button prev = btn("<", false, () -> { });
+        Button next = btn(">", false, () -> { });
+        LinearLayout nodesFooter = new LinearLayout(this);
+        nodesFooter.setOrientation(LinearLayout.VERTICAL);
 
         LinearLayout content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
@@ -1532,8 +1597,6 @@ public class MainActivity extends Activity {
         nameRow.addView(name, new LinearLayout.LayoutParams(0, -2, 1));
         nameRow.addView(counter);
         content.addView(nameRow, topMargin(8));
-        int dialogWidth = Math.min((int) (getResources().getDisplayMetrics().widthPixels * 0.92f), dp(400));
-        int qrSide = Math.min(dialogWidth - dp(36), dp(280));
         ImageView qr = new ImageView(this);
         LinearLayout.LayoutParams qrParams = new LinearLayout.LayoutParams(qrSide, qrSide);
         qrParams.gravity = Gravity.CENTER_HORIZONTAL;
@@ -1552,39 +1615,79 @@ public class MainActivity extends Activity {
         scroller.addView(content);
         root.addView(scroller, new LinearLayout.LayoutParams(-1, 0, 1));
 
-        int[] index = {0};
-        Button prev = btn("<", false, () -> { });
-        Button next = btn(">", false, () -> { });
         Runnable show = () -> {
+            JSONArray links = currentLinks[0];
             JSONObject item = links.optJSONObject(index[0]);
             name.setText(item.optString("name"));
-            counter.setText((index[0] + 1) + " of " + links.length());
-            android.graphics.Bitmap bitmap = Exports.qr(item.optJSONObject("qr"), qrSide);
+            counter.setText(links.length() > 1 ? (index[0] + 1) + " of " + links.length() : "");
+            Bitmap bitmap = Exports.qr(item.optJSONObject("qr"), qrSide);
             qr.setImageBitmap(bitmap);
             qr.setVisibility(bitmap == null ? View.GONE : View.VISIBLE);
             tooLong.setVisibility(bitmap == null ? View.VISIBLE : View.GONE);
             link.setText(item.optString("url"));
             note.setText(item.optString("note"));
             note.setVisibility(item.optString("note").isEmpty() ? View.GONE : View.VISIBLE);
+            prev.setVisibility(links.length() > 1 ? View.VISIBLE : View.GONE);
+            next.setVisibility(links.length() > 1 ? View.VISIBLE : View.GONE);
             prev.setEnabled(index[0] > 0);
             next.setEnabled(index[0] < links.length() - 1);
             prev.setAlpha(prev.isEnabled() ? 1 : 0.4f);
             next.setAlpha(next.isEnabled() ? 1 : 0.4f);
+            nodesFooter.setVisibility(inNodesMode[0] && links.length() > 1 ? View.VISIBLE : View.GONE);
         };
+
+        if (hasBoth) {
+            LinearLayout modeRow = new LinearLayout(this);
+            modeRow.setOrientation(LinearLayout.HORIZONTAL);
+            Button subBtn = btn("Subscription link", true, () -> {});
+            Button nodesBtn = btn("Nodes as VLESS (" + nodeLinks.length() + ")", false, () -> {});
+            Runnable updateTabs = () -> {
+                subBtn.setBackground(round(inNodesMode[0] ? CONTROL : ACCENT, 8));
+                subBtn.setTextColor(inNodesMode[0] ? MUTED : 0xFF0F1319);
+                nodesBtn.setBackground(round(inNodesMode[0] ? ACCENT : CONTROL, 8));
+                nodesBtn.setTextColor(inNodesMode[0] ? 0xFF0F1319 : MUTED);
+            };
+            subBtn.setOnClickListener(v -> {
+                if (inNodesMode[0]) {
+                    inNodesMode[0] = false;
+                    currentLinks[0] = subLinks;
+                    index[0] = 0;
+                    updateTabs.run();
+                    show.run();
+                }
+            });
+            nodesBtn.setOnClickListener(v -> {
+                if (!inNodesMode[0]) {
+                    inNodesMode[0] = true;
+                    currentLinks[0] = nodeLinks;
+                    index[0] = 0;
+                    updateTabs.run();
+                    show.run();
+                }
+            });
+            updateTabs.run();
+            modeRow.addView(subBtn, new LinearLayout.LayoutParams(0, -2, 1));
+            View spacer = new View(this);
+            modeRow.addView(spacer, new LinearLayout.LayoutParams(dp(8), 1));
+            modeRow.addView(nodesBtn, new LinearLayout.LayoutParams(0, -2, 1));
+            root.addView(modeRow, 1);
+        }
+
         prev.setOnClickListener(v -> { index[0]--; show.run(); });
         next.setOnClickListener(v -> { index[0]++; show.run(); });
-        Button copyLink = btn("Copy link", true, () -> copy("VLESS link", links.optJSONObject(index[0]).optString("url"), "Link copied"));
-        LinearLayout actions = links.length() > 1 ? row(copyLink, prev, next) : row(copyLink);
+        Button copyLink = btn("Copy link", true, () -> copy("Link", currentLinks[0].optJSONObject(index[0]).optString("url"), "Link copied"));
+        LinearLayout actions = row(copyLink, prev, next);
         root.addView(actions, topMargin(10));
-        if (links.length() > 1) {
+        if (nodeLinks != null && nodeLinks.length() > 1) {
             StringBuilder joined = new StringBuilder();
-            for (int i = 0; i < links.length(); i++) joined.append(i > 0 ? "\n" : "").append(links.optJSONObject(i).optString("url"));
+            for (int i = 0; i < nodeLinks.length(); i++) joined.append(i > 0 ? "\n" : "").append(nodeLinks.optJSONObject(i).optString("url"));
             String all = joined.toString();
-            root.addView(text(links.length() + " links" + (skipped > 0 ? " | " + skipped + " non-VLESS nodes skipped" : ""), 11, MUTED, false), topMargin(6));
-            root.addView(equalRow(
-                    btn("Copy all links", false, () -> copy("VLESS links", all, links.length() + " links copied")),
+            nodesFooter.addView(text(nodeLinks.length() + " links" + (skipped > 0 ? " | " + skipped + " non-VLESS nodes skipped" : ""), 11, MUTED, false), topMargin(6));
+            nodesFooter.addView(equalRow(
+                    btn("Copy all links", false, () -> copy("VLESS links", all, nodeLinks.length() + " links copied")),
                     btn("Copy as subscription", false, () -> copy("Subscription", android.util.Base64.encodeToString(
                             all.getBytes(java.nio.charset.StandardCharsets.UTF_8), android.util.Base64.NO_WRAP), "Base64 subscription copied"))));
+            root.addView(nodesFooter);
         }
         LinearLayout close = new LinearLayout(this);
         close.setGravity(Gravity.END);
@@ -1601,8 +1704,19 @@ public class MainActivity extends Activity {
     }
 
     private void askLines(String title, String hint, Consumer<String> ok) {
+        askLines(title, hint, null, ok);
+    }
+
+    private void askLines(String title, String hint, Runnable onScan, Consumer<String> ok) {
         Dialog dialog = new Dialog(this);
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+        dialog.setOnKeyListener((d, keyCode, event) -> {
+            if (keyCode == KeyEvent.KEYCODE_ESCAPE && event.getAction() == KeyEvent.ACTION_UP) {
+                dialog.dismiss();
+                return true;
+            }
+            return false;
+        });
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setPadding(dp(20), dp(18), dp(20), dp(18));
@@ -1630,6 +1744,13 @@ public class MainActivity extends Activity {
         LinearLayout buttons = new LinearLayout(this);
         buttons.setGravity(Gravity.END);
         buttons.addView(btn("Cancel", false, dialog::dismiss));
+        if (onScan != null) {
+            buttons.addView(new View(this), new LinearLayout.LayoutParams(dp(8), 1));
+            buttons.addView(btn("Scan QR", false, () -> {
+                dialog.dismiss();
+                onScan.run();
+            }));
+        }
         buttons.addView(new View(this), new LinearLayout.LayoutParams(dp(8), 1));
         buttons.addView(btn("Add", true, () -> {
             String value = input.getText().toString().trim();
@@ -1964,9 +2085,11 @@ public class MainActivity extends Activity {
             LinearLayout identity = card("Device identity", "Stable Happ-compatible identity for every panel");
             JSONObject device = st.optJSONObject("device");
             String hwid = device == null ? "" : device.optString("hwid");
-            actionRow(identity, "Hardware ID", hwid, () -> ask("Hardware ID", hwid, InputType.TYPE_CLASS_TEXT, value -> {
-                if (!value.matches("[a-zA-Z0-9=-]{10,64}")) { toast("HWID must be 10-64 letters, digits, = or -"); return; }
-                try { Ctl.patch("device", new JSONObject(device.toString()).put("hwid", value)); } catch (Exception e) { failed(e); }
+            actionRow(identity, "Hardware ID", hwid, () -> askHWID(hwid), icon(R.drawable.clashvless_qr, "Export HWID as QR code", !hwid.isEmpty(), () -> {
+                try {
+                    Exports.call(this, new JSONObject().put("links", new JSONArray().put(new JSONObject().put("name", "Hardware ID").put("url", hwid))),
+                            response -> showShare("Export | Hardware ID", response));
+                } catch (Exception e) { failed(e); }
             }));
             if (device != null) {
                 identity.addView(text("Panel OS: " + device.optString("os") + " " + device.optString("os_ver")
@@ -2036,8 +2159,60 @@ public class MainActivity extends Activity {
         else onActivityResult(1, RESULT_OK, null);
     }
 
+    private void scanQR(String title, Consumer<String> onResult) {
+        pendingScanTitle = title;
+        pendingScanCallback = onResult;
+        if (Build.VERSION.SDK_INT >= 23 && checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{Manifest.permission.CAMERA}, REQ_CAMERA_PERMISSION);
+            return;
+        }
+        QrScanner.showScanner(this, title, () -> QrScanner.pickImage(this), onResult);
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        if (requestCode == REQ_CAMERA_PERMISSION) {
+            if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                if (pendingScanCallback != null) {
+                    QrScanner.showScanner(this, pendingScanTitle, () -> QrScanner.pickImage(this), pendingScanCallback);
+                }
+            } else {
+                toast("Camera permission denied; pick an image instead");
+                if (pendingScanCallback != null) {
+                    QrScanner.pickImage(this);
+                }
+            }
+            return;
+        }
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+    }
+
     @Override
     protected void onActivityResult(int request, int result, Intent data) {
+        if (request == QrScanner.REQ_PICK_IMAGE) {
+            Consumer<String> callback = pendingScanCallback;
+            pendingScanCallback = null;
+            if (result != RESULT_OK || data == null || data.getData() == null || callback == null) return;
+            Uri uri = data.getData();
+            new Thread(() -> {
+                try {
+                    String text = QrScanner.decodeImage(getContentResolver(), uri);
+                    runOnUiThread(() -> {
+                        if (isFinishing() || isDestroyed()) return;
+                        if (text != null && !text.isEmpty()) {
+                            callback.accept(text.trim());
+                        } else {
+                            toast("No QR code found in selected image");
+                        }
+                    });
+                } catch (Exception e) {
+                    runOnUiThread(() -> toast("Failed to read image: " + e.getMessage()));
+                } catch (OutOfMemoryError e) {
+                    runOnUiThread(() -> toast("Not enough memory to scan this image"));
+                }
+            }).start();
+            return;
+        }
         if (request != 1) return;
         if (result != RESULT_OK) { renderHead(); return; }
         Intent intent = new Intent(this, VpnSvc.class).setAction(VpnSvc.ACTION_START);
@@ -2046,9 +2221,56 @@ public class MainActivity extends Activity {
     }
 
     private void addSub() {
-        ask("Subscription URL", "", InputType.TYPE_TEXT_VARIATION_URI, value -> {
+        ask("Subscription URL", "", InputType.TYPE_TEXT_VARIATION_URI, this::scanSubQR, value -> {
             if (!value.startsWith("http://") && !value.startsWith("https://")) { toast("Enter a valid http(s) URL"); return; }
             if (Ctl.cmd("addsub", "url", value)) fetching("adding subscription");
+        });
+    }
+
+    private void scanSubQR() {
+        scanQR("Scan subscription QR", this::importSubScanned);
+    }
+
+    private void importSubScanned(String text) {
+        text = text.trim();
+        if (text.startsWith("http://") || text.startsWith("https://")) {
+            if (Ctl.cmd("addsub", "url", text)) fetching("adding subscription");
+            toast("Subscription added");
+        } else if (text.startsWith("vless://") || text.contains("vless://")) {
+            String vless = text;
+            confirm("Scanned a VLESS exit link. Add it to exit routes instead?", () -> {
+                JSONObject st = Ctl.state;
+                JSONArray slots = st == null ? null : st.optJSONArray("slots");
+                String slot = slots != null && slots.length() > 0 ? slots.optJSONObject(0).optString("name") : "main";
+                importExitsToSlot(slot, vless);
+            });
+        } else {
+            toast("Scanned text is not a valid subscription URL: " + text);
+        }
+    }
+
+    private void askHWID(String hwid) {
+        ask("Hardware ID", hwid, InputType.TYPE_CLASS_TEXT, this::scanHWID, value -> {
+            if (!value.matches("[a-zA-Z0-9=-]{10,64}")) { toast("HWID must be 10-64 letters, digits, = or -"); return; }
+            try {
+                JSONObject device = Ctl.state == null ? new JSONObject() : Ctl.state.optJSONObject("device");
+                Ctl.patch("device", new JSONObject(device != null ? device.toString() : "{}").put("hwid", value));
+            } catch (Exception e) { failed(e); }
+        });
+    }
+
+    private void scanHWID() {
+        scanQR("Scan Hardware ID QR", text -> {
+            text = text.trim();
+            if (!text.matches("[a-zA-Z0-9=-]{10,64}")) {
+                toast("Scanned text is not a valid HWID: " + text);
+                return;
+            }
+            try {
+                JSONObject device = Ctl.state == null ? new JSONObject() : Ctl.state.optJSONObject("device");
+                Ctl.patch("device", new JSONObject(device != null ? device.toString() : "{}").put("hwid", text));
+                toast("Hardware ID updated");
+            } catch (Exception e) { failed(e); }
         });
     }
 
@@ -2254,6 +2476,10 @@ public class MainActivity extends Activity {
     }
 
     private void actionRow(LinearLayout parent, String label, String value, Runnable action) {
+        actionRow(parent, label, value, action, null);
+    }
+
+    private void actionRow(LinearLayout parent, String label, String value, Runnable action, View extra) {
         LinearLayout texts = new LinearLayout(this);
         texts.setOrientation(LinearLayout.VERTICAL);
         texts.addView(text(label, 13, TEXT, false));
@@ -2262,6 +2488,11 @@ public class MainActivity extends Activity {
         row.setGravity(Gravity.CENTER_VERTICAL);
         row.setPadding(0, dp(4), 0, dp(4));
         row.addView(texts, new LinearLayout.LayoutParams(0, -2, 1));
+        if (extra != null) {
+            LinearLayout.LayoutParams extraParams = new LinearLayout.LayoutParams(-2, -2);
+            extraParams.setMargins(dp(6), 0, 0, 0);
+            row.addView(extra, extraParams);
+        }
         LinearLayout.LayoutParams buttonParams = new LinearLayout.LayoutParams(-2, -2);
         buttonParams.setMargins(dp(8), 0, 0, 0);
         row.addView(btn("Edit", false, action), buttonParams);
@@ -2433,8 +2664,19 @@ public class MainActivity extends Activity {
     }
 
     private void ask(String title, String initial, int variation, Consumer<String> ok) {
+        ask(title, initial, variation, null, ok);
+    }
+
+    private void ask(String title, String initial, int variation, Runnable onScan, Consumer<String> ok) {
         Dialog dialog = new Dialog(this);
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+        dialog.setOnKeyListener((d, keyCode, event) -> {
+            if (keyCode == KeyEvent.KEYCODE_ESCAPE && event.getAction() == KeyEvent.ACTION_UP) {
+                dialog.dismiss();
+                return true;
+            }
+            return false;
+        });
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
@@ -2489,6 +2731,15 @@ public class MainActivity extends Activity {
         });
 
         buttons.addView(cancelBtn);
+        if (onScan != null) {
+            View scanSpacer = new View(this);
+            buttons.addView(scanSpacer, new LinearLayout.LayoutParams(dp(8), 1));
+            Button scanBtn = btn("Scan QR", false, () -> {
+                dialog.dismiss();
+                onScan.run();
+            });
+            buttons.addView(scanBtn);
+        }
         View btnSpacer = new View(this);
         buttons.addView(btnSpacer, new LinearLayout.LayoutParams(dp(8), 1));
         buttons.addView(saveBtn);
@@ -2515,6 +2766,13 @@ public class MainActivity extends Activity {
     private void choose(String title, String[] items, IntConsumer pick) {
         Dialog dialog = new Dialog(this);
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+        dialog.setOnKeyListener((d, keyCode, event) -> {
+            if (keyCode == KeyEvent.KEYCODE_ESCAPE && event.getAction() == KeyEvent.ACTION_UP) {
+                dialog.dismiss();
+                return true;
+            }
+            return false;
+        });
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
@@ -2573,6 +2831,13 @@ public class MainActivity extends Activity {
     private void confirm(String question, Runnable yes) {
         Dialog dialog = new Dialog(this);
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+        dialog.setOnKeyListener((d, keyCode, event) -> {
+            if (keyCode == KeyEvent.KEYCODE_ESCAPE && event.getAction() == KeyEvent.ACTION_UP) {
+                dialog.dismiss();
+                return true;
+            }
+            return false;
+        });
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);

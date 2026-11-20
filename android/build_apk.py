@@ -59,6 +59,13 @@ def java_major(javac):
 def find_jdk():
     """The bin directory of a JDK 17+: JAVA_HOME, then ~/.jdks, then PATH."""
     homes = [os.environ.get("JAVA_HOME")] + sorted(str(p) for p in (Path.home() / ".jdks").glob("jdk-*"))
+    for pf in (os.environ.get("ProgramFiles", r"C:\Program Files"),
+               os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")):
+        pf_path = Path(pf)
+        if pf_path.is_dir():
+            homes.extend(sorted(str(p) for p in pf_path.glob("Eclipse Adoptium/jdk-*")))
+            homes.extend(sorted(str(p) for p in pf_path.glob("Java/jdk-*")))
+            homes.extend(sorted(str(p) for p in pf_path.glob("Microsoft/jdk-*")))
     for home in homes:
         if home and java_major(Path(home) / "bin" / ("javac" + EXE)) >= 17:
             return Path(home) / "bin"
@@ -200,6 +207,8 @@ def build(log=print):
     argfile.write_text("\n".join('"' + path.as_posix() + '"' for path in sources), encoding="utf-8")
     run(java("javac"), "-encoding", "UTF-8", "-nowarn", "--release", "17", "-classpath", android_jar,
         "-d", OUT / "classes", "@" + str(argfile))
+    log("Running scan & import tests")
+    run(java("java"), "-cp", f"{OUT / 'classes'}{os.pathsep}{android_jar}", "com.clashvless.ScanImportTest")
     classes = OUT / "classes.jar"
     with zipfile.ZipFile(classes, "w") as jar:
         for path in sorted((OUT / "classes").rglob("*.class")):
