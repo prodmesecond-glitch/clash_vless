@@ -311,9 +311,20 @@ for heap/goroutine leak hunts — see the gRPC probe-leak note under `app/vendor
   `127.0.0.1`; LAN exposure requires an explicit `0.0.0.0` setting. Windows GUI builds use `-H=windowsgui`,
   while the separate `clashvless-cli.exe` intentionally keeps the console subsystem.
 - **Slots** (`store.Slots`, managed in the TUI **Main** tab, CLI `slot`, desktop and Android GUI): the app now runs
-  **multiple independent failover pools**, each a `Slot{Name, Port, Enabled, Mains []Main}`.
+  **multiple independent failover pools**, each a `Slot{Name, Type, Port, Enabled, Mains []Main}` where `Type` is
+  either VLESS (`""`/`"vless"`, default) or HTTP/SOCKS5 upstream proxy (`"proxy"`).
   A slot IS the old single-pool model — it keeps its own **best** main online on its **own SOCKS
-  port** via the T1→T2/T3 cascade. Slots can be renamed via GUI dialogs, CLI `slot rename <slot> <new>`, or
+  port** via the T1→T2/T3 cascade. HTTP/SOCKS5 proxy slots route out through upstream `http://` or `socks5://`
+  proxies with optional username/password auth (`xray.ProxyToOutbound`, `proxy/http` + `proxy/socks` registered in
+  `engine/runner.go`, `xray.ExitToOutbound` dispatched in `engine/supervisor.go` and `main.go`), supporting both direct
+  T1 and hopped T2/T3 through subscription entries (defaults to `AllowNoHop=true`, toggleable per exit). All clients
+  (TUI, Desktop GUI, Android, CLI) let users choose the slot type on creation and add proxy exits via either
+  **copy-paste** (`http://`, `socks5://`, `socks://`, `socks5h://`, `host:port:user:pass`, `user:pass@host:port`,
+  `host:port@user:pass`, `user:pass:host:port`, `host:port`, via `xray.ParseProxy` / `share.ParseProxyExits`) or
+  **manual parameter input** (protocol, host, port, username, password, optional name, allow-direct; Android uses
+  `share.Request.BuildProxy` and `SlotType`/`DefaultScheme`). `ProtoTag` tags proxy exits as `http`, `http·auth`,
+  `socks5`, or `socks5·auth`; `exitURLPattern` and `redactSecrets` redact proxy credentials in error logs and `gen`.
+  Slots can be renamed via GUI dialogs, CLI `slot rename <slot> <new>`, or
   `store.RenameSlot()`, which updates `store.TunSlot` automatically if the renamed slot was used for VPN. Every **enabled** slot runs concurrently (one `engine.slotRunner`
   each); point any app at any slot's port. One slot is the **TUN slot** (`store.TunSlot`,
   `TunSlotName()` falls back to the first enabled): the TUN bridge attaches to **that slot's port

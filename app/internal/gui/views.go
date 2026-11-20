@@ -162,7 +162,11 @@ func (d *dashboard) slotPanel(slotIndex int, slot store.Slot, tunSlot string) fy
 	titleRow := flexRow(titleLeft, d.iconButton(theme.DeleteIcon(), "Delete slot", func() { d.removeSlot(slotIndex) }))
 
 	isTun := tunSlot != "" && slot.Name == tunSlot
-	ports := []fyne.CanvasObject{neutralChip(fmt.Sprintf("Port %d", slot.Port))}
+	ports := []fyne.CanvasObject{}
+	if slot.IsProxy() {
+		ports = append(ports, tintChip("HTTP/SOCKS", colorAccent))
+	}
+	ports = append(ports, neutralChip(fmt.Sprintf("Port %d", slot.Port)))
 	if hop := d.state.HopPort(slotIndex); hop > 0 {
 		ports = append(ports, neutralChip(fmt.Sprintf("Hop %d", hop)))
 	}

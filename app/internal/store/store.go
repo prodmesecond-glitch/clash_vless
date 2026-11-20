@@ -59,6 +59,26 @@ type Main struct {
 	AllowNoHop bool   `json:"allow_no_hop"`
 }
 
+// Slot types: "vless" (default, empty on disk) serves VLESS exits; "proxy"
+// serves HTTP or SOCKS5 upstream proxies with optional username/password auth.
+const (
+	SlotTypeVLESS = "vless"
+	SlotTypeProxy = "proxy"
+)
+
+// NormalizeSlotType maps user-facing slot type aliases to SlotTypeVLESS or
+// SlotTypeProxy. Returns ("", false) for unrecognised values.
+func NormalizeSlotType(t string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(t)) {
+	case "", "vless":
+		return SlotTypeVLESS, true
+	case "proxy", "http", "socks", "socks5", "http/socks", "http-socks", "http_socks":
+		return SlotTypeProxy, true
+	default:
+		return "", false
+	}
+}
+
 // Slot is a failover pool of mains served on its own local SOCKS port. Its
 // supervisor keeps the best working main of the pool online exactly like the
 // single-pool model — a slot IS that model, just one of several. Every enabled
@@ -68,10 +88,22 @@ type Main struct {
 // xray socket in TUN mode) so they never loop into the tunnel.
 type Slot struct {
 	Name    string `json:"name"`
+	Type    string `json:"type,omitempty"` // "" / "vless" = VLESS exits; "proxy" = HTTP/SOCKS5 exits
 	Port    int    `json:"port"`
 	Enabled bool   `json:"enabled"`
 	Mains   []Main `json:"mains"`
 }
+
+// Kind returns the normalised slot type (SlotTypeVLESS or SlotTypeProxy).
+func (sl *Slot) Kind() string {
+	if strings.EqualFold(strings.TrimSpace(sl.Type), SlotTypeProxy) {
+		return SlotTypeProxy
+	}
+	return SlotTypeVLESS
+}
+
+// IsProxy reports whether the slot holds HTTP/SOCKS5 proxy exits.
+func (sl *Slot) IsProxy() bool { return sl.Kind() == SlotTypeProxy }
 
 // DirectMains returns the slot's enabled mains eligible to serve without a hop (T1).
 func (sl *Slot) DirectMains() []Main {
@@ -98,7 +130,7 @@ func (sl *Slot) HopMains() []Main {
 
 // AddMain appends a main to the slot (same defaults as State.AddMain).
 func (sl *Slot) AddMain(u string) {
-	sl.Mains = append(sl.Mains, Main{Name: mainName(u), URL: u, Enabled: true, AllowNoHop: IsVision(u) || IsReality(u)})
+	sl.Mains = append(sl.Mains, Main{Name: mainName(u), URL: u, Enabled: true, AllowNoHop: IsVision(u) || IsReality(u) || IsProxyURL(u)})
 }
 
 // MainIndex returns the index of the main with the given URL, or -1.
@@ -229,7 +261,7 @@ type State struct {
 const DefaultUA = "Happ/3.13.0"
 
 // Version is the app version, shown in the TUI header and `version` command.
-const Version = "0.34.1"
+const Version = "0.35.0"
 
 func Dir() (string, error) {
 	base, err := os.UserConfigDir()
@@ -575,8 +607,14 @@ func (s *State) TunSlotName() string {
 	return s.firstEnabledSlotName()
 }
 
-// AddSlot appends a new enabled, empty slot with a unique name + free port.
+// AddSlot appends a new enabled, empty VLESS slot with a unique name + free port.
 func (s *State) AddSlot(name string) *Slot {
+	return s.AddSlotOfType(name, SlotTypeVLESS)
+}
+
+// AddSlotOfType appends a new enabled, empty slot of the given type
+// (SlotTypeVLESS or SlotTypeProxy) with a unique name + free port.
+func (s *State) AddSlotOfType(name, slotType string) *Slot {
 	name = strings.TrimSpace(name)
 	if name == "" || s.SlotIndexByName(name) >= 0 {
 		for i := 1; ; i++ {
@@ -587,7 +625,15 @@ func (s *State) AddSlot(name string) *Slot {
 			}
 		}
 	}
-	s.Slots = append(s.Slots, Slot{Name: name, Port: s.FreeSlotPort(), Enabled: true})
+	kind, ok := NormalizeSlotType(slotType)
+	if !ok {
+		kind = SlotTypeVLESS
+	}
+	persistedType := ""
+	if kind == SlotTypeProxy {
+		persistedType = SlotTypeProxy
+	}
+	s.Slots = append(s.Slots, Slot{Name: name, Type: persistedType, Port: s.FreeSlotPort(), Enabled: true})
 	return &s.Slots[len(s.Slots)-1]
 }
 
@@ -735,11 +781,27 @@ func IsReality(u string) bool {
 	return strings.Contains(u, "security=reality")
 }
 
-// IsPlain reports whether a vless URL is a bare transport — no REALITY/TLS
+// IsProxyURL reports whether u is an HTTP or SOCKS5 upstream proxy URL.
+func IsProxyURL(u string) bool {
+	p, err := url.Parse(strings.TrimSpace(u))
+	if err != nil {
+		return false
+	}
+	switch strings.ToLower(p.Scheme) {
+	case "http", "socks", "socks5", "socks5h":
+		return true
+	}
+	return false
+}
+
+// IsPlain reports whether an exit URL is a bare transport — no REALITY/TLS
 // security and no XTLS-Vision flow. Only a plain main hops through ANY entry;
 // a reality/vision main is limited (reality needs a non-Vision hop, Vision is
 // direct-only). See the README connection matrix.
 func IsPlain(u string) bool {
+	if IsProxyURL(u) {
+		return true
+	}
 	return !IsReality(u) && !strings.Contains(u, "security=tls") && !IsVision(u)
 }
 
@@ -759,14 +821,35 @@ func protoLabel(network, security, flow string) string {
 	return sec + "·" + network
 }
 
-// ProtoTag returns the compact proto tag for a vless:// URL (used for mains).
+// ProtoTag returns the compact proto tag for an exit URL (vless://, http://,
+// or socks5://).
 func ProtoTag(u string) string {
-	p, err := url.Parse(u)
+	p, err := url.Parse(strings.TrimSpace(u))
 	if err != nil {
 		return ""
 	}
+	switch strings.ToLower(p.Scheme) {
+	case "http":
+		if hasAuth(p) {
+			return "http·auth"
+		}
+		return "http"
+	case "socks", "socks5", "socks5h":
+		if hasAuth(p) {
+			return "socks5·auth"
+		}
+		return "socks5"
+	}
 	q := p.Query()
 	return protoLabel(q.Get("type"), q.Get("security"), q.Get("flow"))
+}
+
+func hasAuth(u *url.URL) bool {
+	if u.User == nil {
+		return false
+	}
+	_, hasPass := u.User.Password()
+	return u.User.Username() != "" || hasPass
 }
 
 // OutboundProtoTag returns the compact proto tag for a resolved xray outbound

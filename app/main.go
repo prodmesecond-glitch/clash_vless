@@ -178,11 +178,11 @@ func run(args []string) error {
 		fmt.Println("  subs             list subscriptions")
 		fmt.Println("  rm <index>       remove a subscription")
 		fmt.Println("  main                  list slots + their final-exit mains")
-		fmt.Println("  main add <vless://> [slot]   add a main (Vision → direct/T1, plain → hop/T2)")
+		fmt.Println("  main add <url|proxy> [slot] [--proto http|socks5]  add an exit (VLESS or HTTP/SOCKS5)")
 		fmt.Println("  main rm <index> [slot]       remove a main")
 		fmt.Println("  main move <from> <to> [slot] reorder mains (index 0 = tried first)")
 		fmt.Println("  slot                  list slots (failover pools, each on its own port)")
-		fmt.Println("  slot add [name] · rename <name> <new> · rm <name> · port <name> <port> · tun <name> · enable|disable <name>")
+		fmt.Println("  slot add [name] [--type vless|proxy] · rename <name> <new> · rm <name> · port <name> <port> · tun <name> · enable|disable <name>")
 		fmt.Println("  fetch            refetch all subscriptions")
 		fmt.Println("  fetch-proxy [addr|off]  fetch subs through a proxy: socks5://h:p, http://h:p, or h:p (socks5)")
 		fmt.Println("  loglevel [none|error|warning|info|debug]  xray log verbosity")
@@ -500,7 +500,7 @@ func tierConfig(st *store.State, args []string) (mainOB, entryOB json.RawMessage
 		entryOB = n.Outbound
 		label = n.Name + " → " + m.Name
 	}
-	mainOB, err = xray.VlessToOutbound(m.URL, "main")
+	mainOB, err = xray.ExitToOutbound(m.URL, "main")
 	if err != nil {
 		return nil, nil, "", err
 	}
@@ -881,10 +881,27 @@ func cmdMain(st *store.State, args []string) error {
 	}
 	switch args[0] {
 	case "add":
-		if len(args) < 2 {
-			return errors.New("usage: clashvless main add <vless://...> [slot]")
+		var pos []string
+		proto := ""
+		for i := 1; i < len(args); i++ {
+			a := args[i]
+			switch {
+			case a == "--proto" || a == "-p":
+				if i+1 >= len(args) {
+					return errors.New("--proto requires http or socks5")
+				}
+				i++
+				proto = args[i]
+			case strings.HasPrefix(a, "--proto="):
+				proto = strings.TrimPrefix(a, "--proto=")
+			default:
+				pos = append(pos, a)
+			}
 		}
-		return addMainCLI(st, args[1], argOr(args, 2, ""))
+		if len(pos) < 1 {
+			return errors.New("usage: clashvless main add <vless://...|proxy> [slot] [--proto http|socks5]")
+		}
+		return addMainCLI(st, pos[0], argOr(pos, 1, ""), proto)
 	case "rm", "remove", "del":
 		if len(args) < 2 {
 			return errors.New("usage: clashvless main rm <index> [slot]")
@@ -926,25 +943,47 @@ func cmdMain(st *store.State, args []string) error {
 		}
 		return listMains(st)
 	default:
-		return addMainCLI(st, args[0], "") // bare `main <vless://>` = add to first slot
+		return addMainCLI(st, args[0], "", "") // bare `main <url>` = add to first slot
 	}
 }
 
-func addMainCLI(st *store.State, u, slot string) error {
-	u = strings.TrimSpace(u)
-	if _, err := xray.VlessToOutbound(u, "main"); err != nil {
-		return fmt.Errorf("invalid vless url: %w", err)
-	}
+func addMainCLI(st *store.State, raw, slot, defaultProto string) error {
+	raw = strings.TrimSpace(raw)
 	sl, err := slotArg(st, slot)
 	if err != nil {
 		return err
+	}
+	u := raw
+	if sl.IsProxy() {
+		if strings.HasPrefix(strings.ToLower(raw), "vless://") {
+			return fmt.Errorf("slot %q is an HTTP/SOCKS proxy slot (cannot add a vless:// exit)", sl.Name)
+		}
+		spec, err := xray.ParseProxy(raw, defaultProto)
+		if err != nil {
+			return fmt.Errorf("invalid proxy exit: %w", err)
+		}
+		formatted, err := xray.FormatProxyURL(spec)
+		if err != nil {
+			return err
+		}
+		u = formatted
+	} else {
+		if store.IsProxyURL(raw) {
+			return fmt.Errorf("slot %q is a VLESS slot — create an HTTP/SOCKS slot first: clashvless slot add --type proxy", sl.Name)
+		}
+		if _, err := xray.VlessToOutbound(raw, "main"); err != nil {
+			return fmt.Errorf("invalid vless url: %w", err)
+		}
+	}
+	if sl.HasMain(u) {
+		return fmt.Errorf("exit already present in slot %q", sl.Name)
 	}
 	sl.AddMain(u)
 	if err := commit(st, "slots"); err != nil {
 		return err
 	}
 	fmt.Printf("✓ added to slot %q — %s\n", sl.Name, mainModeHint(u))
-	if looksCutOff(u) {
+	if !sl.IsProxy() && looksCutOff(u) {
 		fmt.Println("⚠ no type= or security= in this URL, so it was saved as plain TCP. If your shell cut it at an unquoted &, it also lost the slot argument: remove it and re-add with the URL in quotes.")
 	}
 	return listMains(st)
@@ -991,11 +1030,38 @@ func cmdSlot(st *store.State, args []string) error {
 	}
 	switch args[0] {
 	case "add":
-		sl := st.AddSlot(argOr(args, 1, ""))
+		var name, slotType string
+		for i := 1; i < len(args); i++ {
+			a := args[i]
+			switch {
+			case a == "--type" || a == "-t":
+				if i+1 >= len(args) {
+					return errors.New("--type requires vless or proxy")
+				}
+				i++
+				slotType = args[i]
+			case strings.HasPrefix(a, "--type="):
+				slotType = strings.TrimPrefix(a, "--type=")
+			case name == "":
+				name = a
+			}
+		}
+		kind, ok := store.NormalizeSlotType(slotType)
+		if !ok {
+			return fmt.Errorf("invalid slot type %q (use vless or proxy)", slotType)
+		}
+		if strings.Contains(name, "://") {
+			return errors.New("slot name cannot contain ://")
+		}
+		sl := st.AddSlotOfType(name, kind)
 		if err := commit(st, "slots", "tun_slot"); err != nil {
 			return err
 		}
-		fmt.Printf("✓ slot %q added on :%d\n", sl.Name, sl.Port)
+		if sl.IsProxy() {
+			fmt.Printf("✓ slot %q (http/socks) added on :%d\n", sl.Name, sl.Port)
+		} else {
+			fmt.Printf("✓ slot %q added on :%d\n", sl.Name, sl.Port)
+		}
 		return listMains(st)
 	case "rename":
 		if len(args) < 3 {
@@ -1098,6 +1164,8 @@ func slotIndexArg(st *store.State, s string) (int, error) {
 
 func mainModeHint(u string) string {
 	switch {
+	case store.IsProxyURL(u):
+		return "HTTP/SOCKS5 → direct/T1 + hop/T2-T3 (w/o-hop on)"
 	case store.IsVision(u):
 		return "Vision → direct/T1 (w/o-hop on)"
 	case store.IsReality(u):
@@ -1120,9 +1188,17 @@ func listMains(st *store.State) error {
 		if sl.Enabled {
 			state = "on"
 		}
-		fmt.Printf("%s slot %q  :%d  [%s]\n", mark, sl.Name, sl.Port, state)
+		kind := "vless"
+		if sl.IsProxy() {
+			kind = "http/socks"
+		}
+		fmt.Printf("%s slot %q  :%d  [%s]  [%s]\n", mark, sl.Name, sl.Port, kind, state)
 		if len(sl.Mains) == 0 {
-			fmt.Printf("    (no mains — clashvless main add <vless://...> %s)\n", sl.Name)
+			if sl.IsProxy() {
+				fmt.Printf("    (no exits — clashvless main add <socks5://user:pass@host:port|host:port:user:pass> %s)\n", sl.Name)
+			} else {
+				fmt.Printf("    (no mains — clashvless main add <vless://...> %s)\n", sl.Name)
+			}
 			continue
 		}
 		for i := range sl.Mains {
@@ -1135,11 +1211,11 @@ func listMains(st *store.State) error {
 			if m.AllowNoHop {
 				mode = "direct-ok"
 			}
-			vis := ""
-			if store.IsVision(m.URL) {
-				vis = "  [vision]"
+			tag := ""
+			if p := store.ProtoTag(m.URL); p != "" {
+				tag = "  [" + p + "]"
 			}
-			fmt.Printf("    [%d] %s %-26s  %s%s\n", i, en, trunc(m.Name, 26), mode, vis)
+			fmt.Printf("    [%d] %s %-26s  %s%s\n", i, en, trunc(m.Name, 26), mode, tag)
 		}
 	}
 	return nil
@@ -1183,7 +1259,7 @@ func trunc(s string, n int) string {
 	return string(r[:n-1]) + "…"
 }
 
-var secretRe = regexp.MustCompile(`("(?:id|publicKey|shortId|password)"\s*:\s*")[^"]*`)
+var secretRe = regexp.MustCompile(`("(?:id|publicKey|shortId|password|pass)"\s*:\s*")[^"]*`)
 
 func redactSecrets(s string) string {
 	return secretRe.ReplaceAllString(s, `${1}<redacted>`)

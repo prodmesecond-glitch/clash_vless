@@ -59,10 +59,25 @@ const (
 	inputNone = iota
 	inputAddSub
 	inputAddMain
+	inputSlotType
 	inputAddSlot
+	inputProxyMode
+	inputAddProxyPaste
+	inputAddProxyManual
 	inputSlotPort
 	inputEditCfg
 	inputEditStr
+)
+
+const (
+	pfProto = iota
+	pfHost
+	pfPort
+	pfUser
+	pfPass
+	pfName
+	pfDirect
+	pfCount
 )
 
 type model struct {
@@ -85,6 +100,22 @@ type model struct {
 	inputMode   int
 	inputBuf    string
 	busy        string
+
+	// slot creation & HTTP/SOCKS5 proxy exit input
+	slotTypeCur     int    // 0 = VLESS, 1 = HTTP/SOCKS5
+	newSlotType     string // store.SlotTypeVLESS or store.SlotTypeProxy
+	proxyModeCur    int    // 0 = Copy-paste, 1 = Manual parameters
+	proxyPasteProto string // "socks5" or "http" default for scheme-less copy-paste
+	proxyFormField  int
+	proxyFormProto  string
+	proxyFormHost   string
+	proxyFormPort   string
+	proxyFormUser   string
+	proxyFormPass   string
+	proxyFormName   string
+	proxyFormDirect bool
+	proxyFormShowPw bool
+	proxyFormErr    string
 
 	// first-run setup wizard (see wizard.go)
 	wiz        int
@@ -245,6 +276,16 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *model) handleInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch m.inputMode {
+	case inputSlotType:
+		return m.handleSlotTypeInput(msg)
+	case inputProxyMode:
+		return m.handleProxyModeInput(msg)
+	case inputAddProxyPaste:
+		return m.handleProxyPasteInput(msg)
+	case inputAddProxyManual:
+		return m.handleProxyManualInput(msg)
+	}
 	switch msg.Type {
 	case tea.KeyEsc:
 		m.inputMode, m.inputBuf, m.busy = inputNone, "", ""
@@ -268,8 +309,13 @@ func (m *model) handleInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.busy = "that's a URL, not a slot name — press a to add a main"
 				return m, nil
 			}
-			m.apply(func(st *store.State) { st.AddSlot(name) })
-			m.busy = "slot added"
+			kind := m.newSlotType
+			m.apply(func(st *store.State) { st.AddSlotOfType(name, kind) })
+			if kind == store.SlotTypeProxy {
+				m.busy = "http/socks slot added"
+			} else {
+				m.busy = "slot added"
+			}
 		case inputSlotPort:
 			if v, err := strconv.Atoi(strings.TrimSpace(raw)); err == nil && v >= 1024 && v <= 65534 {
 				s := m.portSlot
@@ -314,6 +360,283 @@ func (m *model) handleInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+func (m *model) handleSlotTypeInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.inputMode, m.busy = inputNone, ""
+	case "up", "down", "left", "right", "tab", "shift+tab", "k", "j", "h", "l":
+		m.slotTypeCur = 1 - m.slotTypeCur
+	case "1":
+		m.slotTypeCur = 0
+		m.advanceSlotName()
+	case "2":
+		m.slotTypeCur = 1
+		m.advanceSlotName()
+	case "enter":
+		m.advanceSlotName()
+	}
+	return m, nil
+}
+
+func (m *model) advanceSlotName() {
+	if m.slotTypeCur == 1 {
+		m.newSlotType = store.SlotTypeProxy
+	} else {
+		m.newSlotType = store.SlotTypeVLESS
+	}
+	m.inputMode, m.inputBuf, m.busy = inputAddSlot, "", "slot name (Enter; blank = auto)"
+}
+
+func (m *model) handleProxyModeInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.inputMode, m.busy = inputNone, ""
+	case "up", "down", "left", "right", "tab", "shift+tab", "k", "j", "h", "l":
+		m.proxyModeCur = 1 - m.proxyModeCur
+	case "1":
+		m.proxyModeCur = 0
+		m.startProxyPaste()
+	case "2":
+		m.proxyModeCur = 1
+		m.startProxyManual()
+	case "enter":
+		if m.proxyModeCur == 1 {
+			m.startProxyManual()
+		} else {
+			m.startProxyPaste()
+		}
+	}
+	return m, nil
+}
+
+func (m *model) startProxyPaste() {
+	if m.proxyPasteProto == "" {
+		m.proxyPasteProto = "socks5"
+	}
+	m.inputMode = inputAddProxyPaste
+	m.inputBuf = ""
+	m.proxyFormErr = ""
+	m.busy = "paste proxy, Tab switches default proto, Enter to add"
+}
+
+func (m *model) startProxyManual() {
+	m.inputMode = inputAddProxyManual
+	m.proxyFormField = pfProto
+	m.proxyFormProto = "socks5"
+	m.proxyFormHost = ""
+	m.proxyFormPort = ""
+	m.proxyFormUser = ""
+	m.proxyFormPass = ""
+	m.proxyFormName = ""
+	m.proxyFormDirect = true
+	m.proxyFormShowPw = false
+	m.proxyFormErr = ""
+	m.busy = "fill parameters, Enter/Ctrl+S to save"
+}
+
+func (m *model) handleProxyPasteInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyEsc:
+		m.inputMode, m.inputBuf, m.proxyFormErr, m.busy = inputNone, "", "", ""
+	case tea.KeyTab, tea.KeyShiftTab:
+		if m.proxyPasteProto == "http" {
+			m.proxyPasteProto = "socks5"
+		} else {
+			m.proxyPasteProto = "http"
+		}
+	case tea.KeyEnter:
+		raw := sanitizeURL(m.inputBuf)
+		spec, err := xray.ParseProxy(raw, m.proxyPasteProto)
+		if err != nil {
+			m.proxyFormErr = err.Error()
+			return m, nil
+		}
+		u, err := xray.FormatProxyURL(spec)
+		if err != nil {
+			m.proxyFormErr = err.Error()
+			return m, nil
+		}
+		m.addProxyMain(u, true)
+		m.inputMode, m.inputBuf, m.proxyFormErr = inputNone, "", ""
+	case tea.KeyBackspace, tea.KeyDelete:
+		m.proxyFormErr = ""
+		if r := []rune(m.inputBuf); len(r) > 0 {
+			m.inputBuf = string(r[:len(r)-1])
+		}
+	case tea.KeyRunes:
+		m.proxyFormErr = ""
+		for _, r := range msg.Runes {
+			if r >= 0x20 && r != 0x7f {
+				m.inputBuf += string(r)
+			}
+		}
+	}
+	return m, nil
+}
+
+func (m *model) handleProxyManualInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyEsc:
+		m.inputMode, m.proxyFormErr, m.busy = inputNone, "", ""
+		return m, nil
+	case tea.KeyCtrlO:
+		m.proxyFormShowPw = !m.proxyFormShowPw
+		return m, nil
+	case tea.KeyCtrlS:
+		m.submitProxyManual()
+		return m, nil
+	case tea.KeyUp, tea.KeyShiftTab:
+		m.proxyFormField = (m.proxyFormField + pfCount - 1) % pfCount
+		return m, nil
+	case tea.KeyDown, tea.KeyTab:
+		m.proxyFormField = (m.proxyFormField + 1) % pfCount
+		return m, nil
+	case tea.KeyLeft, tea.KeyRight:
+		switch m.proxyFormField {
+		case pfProto:
+			if m.proxyFormProto == "http" {
+				m.proxyFormProto = "socks5"
+			} else {
+				m.proxyFormProto = "http"
+			}
+		case pfDirect:
+			m.proxyFormDirect = !m.proxyFormDirect
+		}
+		return m, nil
+	case tea.KeyEnter:
+		if m.proxyFormField < pfCount-1 {
+			m.proxyFormField++
+		} else {
+			m.submitProxyManual()
+		}
+		return m, nil
+	case tea.KeyBackspace, tea.KeyDelete:
+		m.proxyFormErr = ""
+		if p := m.proxyFormTextPtr(); p != nil {
+			if r := []rune(*p); len(r) > 0 {
+				*p = string(r[:len(r)-1])
+			}
+		}
+		return m, nil
+	case tea.KeySpace:
+		switch m.proxyFormField {
+		case pfProto:
+			if m.proxyFormProto == "http" {
+				m.proxyFormProto = "socks5"
+			} else {
+				m.proxyFormProto = "http"
+			}
+			return m, nil
+		case pfDirect:
+			m.proxyFormDirect = !m.proxyFormDirect
+			return m, nil
+		}
+		if p := m.proxyFormTextPtr(); p != nil && m.proxyFormField != pfPort {
+			m.proxyFormErr = ""
+			*p += " "
+		}
+		return m, nil
+	case tea.KeyRunes:
+		if m.proxyFormField == pfProto || m.proxyFormField == pfDirect {
+			if len(msg.Runes) == 1 && msg.Runes[0] == ' ' {
+				if m.proxyFormField == pfProto {
+					if m.proxyFormProto == "http" {
+						m.proxyFormProto = "socks5"
+					} else {
+						m.proxyFormProto = "http"
+					}
+				} else {
+					m.proxyFormDirect = !m.proxyFormDirect
+				}
+			}
+			return m, nil
+		}
+		if p := m.proxyFormTextPtr(); p != nil {
+			m.proxyFormErr = ""
+			for _, r := range msg.Runes {
+				if m.proxyFormField == pfPort {
+					if r >= '0' && r <= '9' {
+						*p += string(r)
+					}
+				} else if r >= 0x20 && r != 0x7f {
+					*p += string(r)
+				}
+			}
+		}
+	}
+	return m, nil
+}
+
+func (m *model) proxyFormTextPtr() *string {
+	switch m.proxyFormField {
+	case pfHost:
+		return &m.proxyFormHost
+	case pfPort:
+		return &m.proxyFormPort
+	case pfUser:
+		return &m.proxyFormUser
+	case pfPass:
+		return &m.proxyFormPass
+	case pfName:
+		return &m.proxyFormName
+	default:
+		return nil
+	}
+}
+
+func (m *model) submitProxyManual() {
+	host := strings.TrimSpace(m.proxyFormHost)
+	if host == "" {
+		m.proxyFormErr = "host is required"
+		m.proxyFormField = pfHost
+		return
+	}
+	port, err := strconv.Atoi(strings.TrimSpace(m.proxyFormPort))
+	if err != nil || port < 1 || port > 65535 {
+		m.proxyFormErr = "port must be 1–65535"
+		m.proxyFormField = pfPort
+		return
+	}
+	u, err := xray.FormatProxyURL(xray.ProxySpec{
+		Scheme: m.proxyFormProto,
+		Host:   host,
+		Port:   port,
+		User:   m.proxyFormUser,
+		Pass:   m.proxyFormPass,
+		Name:   strings.TrimSpace(m.proxyFormName),
+	})
+	if err != nil {
+		m.proxyFormErr = err.Error()
+		return
+	}
+	m.addProxyMain(u, m.proxyFormDirect)
+	m.inputMode, m.proxyFormErr = inputNone, ""
+}
+
+func (m *model) addProxyMain(u string, allowDirect bool) {
+	s := m.addMainSlot
+	dup := false
+	m.apply(func(st *store.State) {
+		var sl *store.Slot
+		if s >= 0 && s < len(st.Slots) {
+			sl = &st.Slots[s]
+		} else {
+			sl = st.DefaultSlot()
+		}
+		if sl.HasMain(u) {
+			dup = true
+			return
+		}
+		sl.AddMain(u)
+		sl.Mains[len(sl.Mains)-1].AllowNoHop = allowDirect
+	})
+	if dup {
+		m.busy = "proxy already in this slot"
+	} else {
+		m.busy = "proxy exit added"
+	}
 }
 
 // sanitizeURL strips control characters and surrounding whitespace from pasted
@@ -624,15 +947,15 @@ var (
 	wizBoxStyle  = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("213")).Padding(1, 3)
 )
 
-// protoStyle colours a proto tag by security kind: plain = green (hops anywhere),
-// vision = amber (direct-only), reality/tls = cyan, else dim.
+// protoStyle colours a proto tag by security/protocol kind: plain/socks5 = green,
+// vision = amber (direct-only), reality/tls/http = cyan, else dim.
 func protoStyle(tag string) lipgloss.Style {
 	switch {
-	case strings.HasPrefix(tag, "plain"):
+	case strings.HasPrefix(tag, "plain"), strings.HasPrefix(tag, "socks"):
 		return okStyle
 	case strings.HasPrefix(tag, "vision"):
 		return amberStyle
-	case strings.HasPrefix(tag, "reality"), strings.HasPrefix(tag, "tls"):
+	case strings.HasPrefix(tag, "reality"), strings.HasPrefix(tag, "tls"), strings.HasPrefix(tag, "http"):
 		return keyStyle
 	default:
 		return dimStyle
@@ -688,7 +1011,15 @@ func (m *model) header() string {
 }
 
 func (m *model) footer() string {
-	if m.inputMode != inputNone {
+	switch m.inputMode {
+	case inputSlotType, inputProxyMode:
+		return keyStyle.Render("↑↓/1-2") + " choose  " + keyStyle.Render("Enter") + " select  " + keyStyle.Render("Esc") + " cancel" + m.busySuffix()
+	case inputAddProxyPaste:
+		return keyStyle.Render("Tab") + " default proto  " + keyStyle.Render("Enter") + " add  " + keyStyle.Render("Esc") + " cancel" + m.busySuffix()
+	case inputAddProxyManual:
+		return keyStyle.Render("↑↓/Tab") + " field  " + keyStyle.Render("←→/Space") + " toggle  " + keyStyle.Render("Ctrl+O") + " show pass  " + keyStyle.Render("Ctrl+S/Enter") + " save  " + keyStyle.Render("Esc") + " cancel" + m.busySuffix()
+	case inputNone:
+	default:
 		return keyStyle.Render("Enter") + " ok  " + keyStyle.Render("Esc") + " cancel" + m.busySuffix()
 	}
 	var ctx string
@@ -1003,7 +1334,11 @@ func (m *model) mainView() string {
 		if st, ok := ss[sl.Name]; ok {
 			live = slotLiveLabel(st)
 		}
-		b.WriteString(fmt.Sprintf("%s%s%-14s :%-5d %s  %s\n", cur, tunMark, trunc(sl.Name, 14), sl.Port, en, live))
+		kindTag := dimStyle.Render("[vless]     ")
+		if sl.IsProxy() {
+			kindTag = keyStyle.Render("[http/socks]")
+		}
+		b.WriteString(fmt.Sprintf("%s%s%-14s :%-5d %s %s  %s\n", cur, tunMark, trunc(sl.Name, 14), sl.Port, kindTag, en, live))
 		for mi := range sl.Mains {
 			mn := &sl.Mains[mi]
 			c2 := "     "
@@ -1027,15 +1362,127 @@ func (m *model) mainView() string {
 		}
 	}
 	switch m.inputMode {
+	case inputSlotType:
+		b.WriteString("\n" + m.slotTypeView())
 	case inputAddMain:
-		b.WriteString("\n" + sectionStyle.Render("add main URL: ") + m.inputBuf + "▏")
+		b.WriteString("\n" + sectionStyle.Render("add vless:// URL: ") + m.inputBuf + "▏")
 	case inputAddSlot:
-		b.WriteString("\n" + sectionStyle.Render("new slot name (blank = auto): ") + m.inputBuf + "▏")
+		kind := "VLESS"
+		if m.newSlotType == store.SlotTypeProxy {
+			kind = "HTTP/SOCKS"
+		}
+		b.WriteString("\n" + sectionStyle.Render("new "+kind+" slot name (blank = auto): ") + m.inputBuf + "▏")
+	case inputProxyMode:
+		b.WriteString("\n" + m.proxyModeView())
+	case inputAddProxyPaste:
+		b.WriteString("\n" + m.proxyPasteView())
+	case inputAddProxyManual:
+		b.WriteString("\n" + m.proxyManualView())
 	case inputSlotPort:
 		b.WriteString("\n" + sectionStyle.Render("slot SOCKS port: ") + m.inputBuf + "▏")
 	}
-	b.WriteString("\n" + dimStyle.Render("  ") + keyStyle.Render("s") + dimStyle.Render(" add slot · ") + keyStyle.Render("a") + dimStyle.Render(" add main · ") + keyStyle.Render("p") + dimStyle.Render(" port · ") + keyStyle.Render("t") + dimStyle.Render(" TUN slot · ") + keyStyle.Render("e") + dimStyle.Render(" enable · ") + keyStyle.Render("w") + dimStyle.Render(" w/o-hop · ") + keyStyle.Render("d") + dimStyle.Render(" delete"))
+	b.WriteString("\n" + dimStyle.Render("  ") + keyStyle.Render("s") + dimStyle.Render(" add slot · ") + keyStyle.Render("a") + dimStyle.Render(" add exit · ") + keyStyle.Render("p") + dimStyle.Render(" port · ") + keyStyle.Render("t") + dimStyle.Render(" TUN slot · ") + keyStyle.Render("e") + dimStyle.Render(" enable · ") + keyStyle.Render("w") + dimStyle.Render(" w/o-hop · ") + keyStyle.Render("d") + dimStyle.Render(" delete"))
 	return b.String()
+}
+
+func (m *model) slotTypeView() string {
+	opt := func(i int, num, title, desc string) string {
+		cur := "  "
+		lbl := fmt.Sprintf("[%s] %-16s", num, title)
+		if m.slotTypeCur == i {
+			cur = activeStyle.Render("▸ ")
+			lbl = activeStyle.Render(lbl)
+		}
+		return cur + lbl + " " + dimStyle.Render(desc)
+	}
+	content := sectionStyle.Render("NEW SLOT TYPE") + "\n" +
+		opt(0, "1", "VLESS", "vless:// exits (direct T1 or hopped T2/T3)") + "\n" +
+		opt(1, "2", "HTTP / SOCKS5", "upstream HTTP/SOCKS5 proxies with optional auth")
+	return boxStyle.Render(content)
+}
+
+func (m *model) proxyModeView() string {
+	slotName := ""
+	if m.addMainSlot >= 0 && m.addMainSlot < len(m.st.Slots) {
+		slotName = m.st.Slots[m.addMainSlot].Name
+	}
+	opt := func(i int, num, title, desc string) string {
+		cur := "  "
+		lbl := fmt.Sprintf("[%s] %-18s", num, title)
+		if m.proxyModeCur == i {
+			cur = activeStyle.Render("▸ ")
+			lbl = activeStyle.Render(lbl)
+		}
+		return cur + lbl + " " + dimStyle.Render(desc)
+	}
+	content := sectionStyle.Render("ADD PROXY EXIT · "+slotName) + "\n" +
+		opt(0, "1", "Copy-paste", "http://, socks5://, host:port:user:pass, user:pass@host:port") + "\n" +
+		opt(1, "2", "Manual parameters", "type protocol, host, port, username, password step by step")
+	return boxStyle.Render(content)
+}
+
+func (m *model) proxyPasteView() string {
+	proto := m.proxyPasteProto
+	if proto == "" {
+		proto = "socks5"
+	}
+	var lines []string
+	lines = append(lines, sectionStyle.Render("COPY-PASTE PROXY")+"   "+dimStyle.Render("default if no scheme: ")+keyStyle.Render(proto)+dimStyle.Render(" (Tab to switch)"))
+	lines = append(lines, keyStyle.Render("› ")+m.inputBuf+"▏")
+	lines = append(lines, dimStyle.Render("  examples: socks5://user:pass@1.2.3.4:1080  ·  http://1.2.3.4:8080  ·  1.2.3.4:1080:user:pass"))
+	if m.proxyFormErr != "" {
+		lines = append(lines, badStyle.Render("  ✖ "+m.proxyFormErr))
+	}
+	return boxStyle.Render(strings.Join(lines, "\n"))
+}
+
+func (m *model) proxyManualView() string {
+	passVal := strings.Repeat("•", len([]rune(m.proxyFormPass)))
+	if m.proxyFormShowPw {
+		passVal = m.proxyFormPass
+	}
+	directVal := "[ ] no (hop only)"
+	if m.proxyFormDirect {
+		directVal = "[x] yes (T1 direct + T2/T3 hop)"
+	}
+	protoVal := "◀ " + strings.ToUpper(m.proxyFormProto) + " ▶"
+	rows := []struct {
+		label string
+		val   string
+		empty string
+		text  bool
+	}{
+		{"Protocol", protoVal, "", false},
+		{"Host", m.proxyFormHost, "1.2.3.4 or proxy.example.com", true},
+		{"Port", m.proxyFormPort, "1080", true},
+		{"Username", m.proxyFormUser, "(optional)", true},
+		{"Password", passVal, "(optional · Ctrl+O show)", true},
+		{"Name", m.proxyFormName, "(optional · defaults to host:port)", true},
+		{"Allow direct", directVal, "", false},
+	}
+	var lines []string
+	lines = append(lines, sectionStyle.Render("MANUAL PROXY PARAMETERS"))
+	for i, r := range rows {
+		cur := "  "
+		lbl := fmt.Sprintf("%-13s", r.label)
+		val := r.val
+		if i == m.proxyFormField {
+			cur = activeStyle.Render("▸ ")
+			lbl = activeStyle.Render(lbl)
+			if r.text {
+				val = val + "▏"
+			} else {
+				val = keyStyle.Render(val)
+			}
+		} else if val == "" {
+			val = dimStyle.Render(r.empty)
+		}
+		lines = append(lines, cur+lbl+" "+val)
+	}
+	if m.proxyFormErr != "" {
+		lines = append(lines, badStyle.Render("  ✖ "+m.proxyFormErr))
+	}
+	return boxStyle.Render(strings.Join(lines, "\n"))
 }
 
 // slotLiveLabel renders a slot's current failover state compactly.
@@ -1073,10 +1520,16 @@ func (m *model) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.mainCursor++
 		}
 	case "s":
-		m.inputMode, m.inputBuf, m.busy = inputAddSlot, "", "slot name (Enter; blank = auto)"
+		m.slotTypeCur = 0
+		m.inputMode, m.inputBuf, m.busy = inputSlotType, "", "choose slot type"
 	case "a":
 		m.addMainSlot = cur.slot
-		m.inputMode, m.inputBuf, m.busy = inputAddMain, "", "paste vless:// URL, Enter to add"
+		if cur.slot >= 0 && cur.slot < len(m.st.Slots) && m.st.Slots[cur.slot].IsProxy() {
+			m.proxyModeCur = 0
+			m.inputMode, m.inputBuf, m.busy = inputProxyMode, "", "choose input method"
+		} else {
+			m.inputMode, m.inputBuf, m.busy = inputAddMain, "", "paste vless:// URL, Enter to add"
+		}
 	case "p":
 		m.portSlot = cur.slot
 		m.inputMode, m.inputBuf, m.busy = inputSlotPort, "", "slot SOCKS port (Enter)"

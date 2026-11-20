@@ -25,6 +25,7 @@ import (
 	"clashvless/internal/loghub"
 	"clashvless/internal/share"
 	"clashvless/internal/store"
+	"clashvless/internal/xray"
 )
 
 type dashboard struct {
@@ -271,7 +272,7 @@ func (d *dashboard) render() {
 	titles := map[string][2]string{
 		"overview":      {"Overview", "Connection and local proxy"},
 		"subscriptions": {"Subscriptions", "Providers and entry nodes"},
-		"routes":        {"Exit routes", "Failover slots and VLESS exits"},
+		"routes":        {"Exit routes", "Failover slots and exits"},
 		"activity":      {"Activity", "Live engine events"},
 		"settings":      {"Settings", "Application preferences"},
 	}
@@ -458,7 +459,12 @@ func (d *dashboard) addMain(slotIndex int) {
 		d.notify("This slot no longer exists")
 		return
 	}
-	slotName := d.state.Slots[slotIndex].Name
+	slot := d.state.Slots[slotIndex]
+	slotName := slot.Name
+	if slot.IsProxy() {
+		d.addProxyExits(slotName)
+		return
+	}
 	d.askMultiline("Add final exits", "VLESS links", "vless://… — one per line, or a base64 subscription", "Add", func(value string) {
 		links, invalid := share.ParseExits(value)
 		if len(links) == 0 {
@@ -492,11 +498,152 @@ func (d *dashboard) addMain(slotIndex int) {
 	})
 }
 
-func (d *dashboard) addSlot() {
-	if d.state == nil {
+func (d *dashboard) addProxyExits(slotName string) {
+	if d.dialogOpen {
 		return
 	}
-	d.ask("Add slot", "Slot name", fmt.Sprintf("slot-%d", len(d.state.Slots)+1), "Add", func(name string) {
+	// Tab 0: copy-paste (URLs or host:port:user:pass / user:pass@host:port / host:port).
+	pasteProto := widget.NewSelect([]string{"SOCKS5", "HTTP"}, nil)
+	pasteProto.SetSelected("SOCKS5")
+	pasteEntry := widget.NewMultiLineEntry()
+	pasteEntry.SetPlaceHolder("socks5://user:pass@host:port\nhttp://user:pass@host:port\nhost:port:user:pass\nuser:pass@host:port")
+	pasteEntry.Wrapping = fyne.TextWrapBreak
+	pasteEntry.SetMinRowsVisible(6)
+	pasteTab := container.NewVBox(
+		widget.NewForm(widget.NewFormItem("Default protocol", pasteProto)),
+		muted("Used when pasted lines omit http:// or socks5://"),
+		pasteEntry,
+	)
+
+	// Tab 1: manual parameter fields.
+	manualProto := widget.NewSelect([]string{"SOCKS5", "HTTP"}, nil)
+	manualProto.SetSelected("SOCKS5")
+	hostEntry := widget.NewEntry()
+	hostEntry.SetPlaceHolder("1.2.3.4 or proxy.example.com")
+	portEntry := widget.NewEntry()
+	portEntry.SetPlaceHolder("1080")
+	userEntry := widget.NewEntry()
+	userEntry.SetPlaceHolder("Optional")
+	passEntry := widget.NewPasswordEntry()
+	passEntry.SetPlaceHolder("Optional")
+	nameEntry := widget.NewEntry()
+	nameEntry.SetPlaceHolder("Optional (defaults to host:port)")
+	allowDirect := widget.NewCheck("Allow direct (T1)", nil)
+	allowDirect.SetChecked(true)
+	manualTab := container.NewVBox(
+		widget.NewForm(
+			widget.NewFormItem("Protocol", manualProto),
+			widget.NewFormItem("Host", hostEntry),
+			widget.NewFormItem("Port", portEntry),
+			widget.NewFormItem("Username", userEntry),
+			widget.NewFormItem("Password", passEntry),
+			widget.NewFormItem("Name", nameEntry),
+		),
+		allowDirect,
+	)
+
+	tabs := container.NewAppTabs(
+		container.NewTabItem("Copy-paste", pasteTab),
+		container.NewTabItem("Manual", manualTab),
+	)
+
+	schemeFor := func(label string) string {
+		if strings.EqualFold(label, "HTTP") {
+			return "http"
+		}
+		return "socks5"
+	}
+
+	form := dialog.NewCustomConfirm("Add HTTP / SOCKS5 exits", "Add", "Cancel", tabs, func(ok bool) {
+		if !ok {
+			return
+		}
+		if d.state == nil || d.state.SlotIndexByName(slotName) < 0 {
+			d.notify("This slot was removed while editing")
+			return
+		}
+		if tabs.SelectedIndex() == 0 {
+			links, invalid := share.ParseProxyExits(pasteEntry.Text, schemeFor(pasteProto.Selected))
+			if len(links) == 0 {
+				d.notify("Enter at least one valid HTTP/SOCKS5 proxy")
+				return
+			}
+			added, duplicate := 0, 0
+			d.updateSlots(func(slots []store.Slot) {
+				slot := &slots[d.state.SlotIndexByName(slotName)]
+				for _, link := range links {
+					if slot.HasMain(link) {
+						duplicate++
+						continue
+					}
+					slot.AddMain(link)
+					added++
+				}
+			})
+			message := fmt.Sprintf("Added %d proxy exit(s) to %s", added, slotName)
+			if duplicate > 0 {
+				message += fmt.Sprintf(" · %d already present", duplicate)
+			}
+			if invalid > 0 {
+				message += fmt.Sprintf(" · %d invalid line(s) skipped", invalid)
+			}
+			d.notify(message)
+			return
+		}
+
+		port, err := strconv.Atoi(strings.TrimSpace(portEntry.Text))
+		if err != nil || port < 1 || port > 65535 {
+			d.notify("Enter a valid port (1–65535)")
+			return
+		}
+		link, err := xray.FormatProxyURL(xray.ProxySpec{
+			Scheme: schemeFor(manualProto.Selected),
+			Host:   strings.TrimSpace(hostEntry.Text),
+			Port:   port,
+			User:   userEntry.Text,
+			Pass:   passEntry.Text,
+			Name:   strings.TrimSpace(nameEntry.Text),
+		})
+		if err != nil {
+			d.notify(err.Error())
+			return
+		}
+		dup := false
+		d.updateSlots(func(slots []store.Slot) {
+			slot := &slots[d.state.SlotIndexByName(slotName)]
+			if slot.HasMain(link) {
+				dup = true
+				return
+			}
+			slot.AddMain(link)
+			slot.Mains[len(slot.Mains)-1].AllowNoHop = allowDirect.Checked
+		})
+		if dup {
+			d.notify("This proxy is already in " + slotName)
+		} else {
+			d.notify("Added proxy exit to " + slotName)
+		}
+	}, d.window)
+	form.Resize(fitScreen(fyne.NewSize(560, 420)))
+	d.showDialog(form)
+}
+
+func (d *dashboard) addSlot() {
+	if d.state == nil || d.dialogOpen {
+		return
+	}
+	nameEntry := widget.NewEntry()
+	nameEntry.SetText(fmt.Sprintf("slot-%d", len(d.state.Slots)+1))
+	typeSelect := widget.NewSelect([]string{"VLESS", "HTTP / SOCKS5 proxy"}, nil)
+	typeSelect.SetSelected("VLESS")
+	form := dialog.NewForm("Add slot", "Add", "Cancel", []*widget.FormItem{
+		widget.NewFormItem("Slot name", nameEntry),
+		widget.NewFormItem("Slot type", typeSelect),
+	}, func(ok bool) {
+		if !ok {
+			return
+		}
+		name := strings.TrimSpace(nameEntry.Text)
 		if d.state == nil || name == "" || d.state.SlotIndexByName(name) >= 0 {
 			d.notify("Enter a unique slot name")
 			return
@@ -505,15 +652,21 @@ func (d *dashboard) addSlot() {
 			d.notify("Slot name cannot contain ://")
 			return
 		}
+		slotType := ""
+		if typeSelect.Selected == "HTTP / SOCKS5 proxy" {
+			slotType = store.SlotTypeProxy
+		}
 		data, _ := json.Marshal(d.state.Slots)
 		var slots []store.Slot
 		_ = json.Unmarshal(data, &slots)
-		newSlot := store.Slot{Name: name, Port: d.state.FreeSlotPort(), Enabled: true}
+		newSlot := store.Slot{Name: name, Type: slotType, Port: d.state.FreeSlotPort(), Enabled: true}
 		slots = append(slots, newSlot)
 		d.selectedSlot = name
 		d.state.Slots = slots
 		d.patch(map[string]any{"slots": slots})
-	})
+	}, d.window)
+	form.Resize(fyne.NewSize(520, 200))
+	d.showDialog(form)
 }
 
 func (d *dashboard) renameSlot(slotIndex int) {
@@ -721,7 +874,7 @@ func routingCompatibilityPanel() fyne.CanvasObject {
 	mark.TextSize = 13
 	icon := container.NewGridWrap(fyne.NewSize(20, 20), container.NewStack(border, container.NewCenter(mark)))
 	title := container.NewBorder(nil, nil, nil, icon, strong("Routing compatibility"))
-	return panel("", "", title, wrappingMuted("Vision exits are direct-only. REALITY exits require a non-Vision hop; plain exits support any hop."))
+	return panel("", "", title, wrappingMuted("Vision exits are direct-only. REALITY exits require a non-Vision hop; plain VLESS and HTTP/SOCKS5 exits support any hop."))
 }
 
 func metric(name, value string) fyne.CanvasObject {
@@ -787,7 +940,7 @@ func milliseconds(duration time.Duration) string {
 func mainHost(raw string) string {
 	parsed, err := url.Parse(raw)
 	if err != nil || parsed.Host == "" {
-		return "Invalid VLESS URL"
+		return "Invalid exit URL"
 	}
 	return parsed.Host
 }

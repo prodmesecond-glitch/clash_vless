@@ -83,3 +83,45 @@ func TestTooLongForQR(t *testing.T) {
 		t.Fatalf("links %+v", response.Links)
 	}
 }
+
+func TestParseProxyExitsAndBuildProxy(t *testing.T) {
+	raw := "http://u:p@1.2.3.4:8080#HTTP1\n5.6.7.8:1080:bob:pw\nnot-valid\n"
+	links, invalid := ParseProxyExits(raw, "socks5")
+	if invalid != 1 || len(links) != 2 {
+		t.Fatalf("links=%v invalid=%d", links, invalid)
+	}
+	if links[0] != "http://u:p@1.2.3.4:8080#HTTP1" || links[1] != "socks5://bob:pw@5.6.7.8:1080" {
+		t.Fatalf("unexpected formatted links: %v", links)
+	}
+
+	// Serve with slot_type="proxy"
+	req := `{"parse":"1.2.3.4:3128:u:p\nhttp://9.9.9.9:8080#Web","slot_type":"proxy","default_scheme":"http"}`
+	var out bytes.Buffer
+	if err := Serve(strings.NewReader(req), &out); err != nil {
+		t.Fatal(err)
+	}
+	var resp Response
+	if err := json.Unmarshal(out.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Invalid != 0 || len(resp.Exits) != 2 {
+		t.Fatalf("resp = %+v", resp)
+	}
+	if resp.Exits[0].URL != "http://u:p@1.2.3.4:3128" || !resp.Exits[0].AllowNoHop {
+		t.Fatalf("first exit = %+v", resp.Exits[0])
+	}
+
+	// Serve with build_proxy (manual parameters)
+	out.Reset()
+	req = `{"build_proxy":{"scheme":"socks5","host":"proxy.example","port":1080,"user":"alice","pass":"pw","name":"EU"}}`
+	if err := Serve(strings.NewReader(req), &out); err != nil {
+		t.Fatal(err)
+	}
+	resp = Response{}
+	if err := json.Unmarshal(out.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Error != "" || len(resp.Exits) != 1 || resp.Exits[0].URL != "socks5://alice:pw@proxy.example:1080#EU" || resp.Exits[0].Name != "EU" {
+		t.Fatalf("build_proxy resp = %+v", resp)
+	}
+}

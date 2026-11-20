@@ -21,7 +21,8 @@ import (
 
 	_ "github.com/xtls/xray-core/proxy/blackhole"      // "block" outbound
 	_ "github.com/xtls/xray-core/proxy/freedom"        // "direct" outbound
-	_ "github.com/xtls/xray-core/proxy/socks"          // local inbound + bridge's socks outbound
+	_ "github.com/xtls/xray-core/proxy/http"           // HTTP proxy outbound exits
+	_ "github.com/xtls/xray-core/proxy/socks"          // local inbound + bridge + SOCKS5 outbound exits
 	_ "github.com/xtls/xray-core/proxy/tun"            // TUN inbound (system-wide capture, bridge instance)
 	_ "github.com/xtls/xray-core/proxy/vless/outbound" // main + entry nodes
 

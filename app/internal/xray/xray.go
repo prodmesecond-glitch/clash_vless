@@ -13,6 +13,7 @@ package xray
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/url"
 	"strconv"
 	"strings"
@@ -106,6 +107,264 @@ func VlessToOutbound(uri, tag string) (json.RawMessage, error) {
 		"streamSettings": stream,
 	}
 	return json.Marshal(ob)
+}
+
+// ProxySpec describes an HTTP or SOCKS5 upstream exit proxy with optional auth.
+type ProxySpec struct {
+	Scheme string `json:"scheme"` // "http" or "socks5"
+	Host   string `json:"host"`
+	Port   int    `json:"port"`
+	User   string `json:"user,omitempty"`
+	Pass   string `json:"pass,omitempty"`
+	Name   string `json:"name,omitempty"`
+}
+
+func normalizeProxyScheme(scheme string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(scheme)) {
+	case "http":
+		return "http", true
+	case "socks", "socks5", "socks5h":
+		return "socks5", true
+	default:
+		return "", false
+	}
+}
+
+func validProxyHost(host string) bool {
+	if host == "" {
+		return false
+	}
+	for _, r := range host {
+		if r <= 0x20 || r == 0x7f || r == '/' || r == '@' || r == '?' || r == '#' {
+			return false
+		}
+	}
+	return true
+}
+
+func parsePort(s string) (int, bool) {
+	p, err := strconv.Atoi(s)
+	if err != nil || p < 1 || p > 65535 {
+		return 0, false
+	}
+	return p, true
+}
+
+// FormatProxyURL validates spec and encodes it as a canonical http:// or
+// socks5:// URL (with optional user:pass and #name fragment).
+func FormatProxyURL(spec ProxySpec) (string, error) {
+	scheme, ok := normalizeProxyScheme(spec.Scheme)
+	if !ok {
+		return "", fmt.Errorf("unsupported proxy protocol %q (use http or socks5)", spec.Scheme)
+	}
+	host := strings.TrimSpace(spec.Host)
+	host = strings.TrimPrefix(host, "[")
+	host = strings.TrimSuffix(host, "]")
+	if !validProxyHost(host) {
+		return "", fmt.Errorf("invalid proxy host %q", spec.Host)
+	}
+	if spec.Port < 1 || spec.Port > 65535 {
+		return "", fmt.Errorf("proxy port must be 1–65535")
+	}
+	u := url.URL{
+		Scheme:   scheme,
+		Host:     net.JoinHostPort(host, strconv.Itoa(spec.Port)),
+		Fragment: strings.TrimSpace(spec.Name),
+	}
+	if spec.User != "" || spec.Pass != "" {
+		if spec.Pass != "" {
+			u.User = url.UserPassword(spec.User, spec.Pass)
+		} else {
+			u.User = url.User(spec.User)
+		}
+	}
+	return u.String(), nil
+}
+
+// ParseProxy parses an HTTP or SOCKS5 upstream proxy from either a standard URL
+// (http://[user:pass@]host:port[#name], socks5://...) or a common proxy-list
+// format (host:port:user:pass, user:pass@host:port, host:port@user:pass,
+// user:pass:host:port, or host:port). When the input omits a scheme,
+// defaultScheme is used (defaulting to "socks5").
+func ParseProxy(raw, defaultScheme string) (ProxySpec, error) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return ProxySpec{}, fmt.Errorf("empty proxy")
+	}
+	if strings.Contains(s, "://") {
+		u, err := url.Parse(s)
+		if err != nil {
+			return ProxySpec{}, fmt.Errorf("parse proxy url: %w", err)
+		}
+		scheme, ok := normalizeProxyScheme(u.Scheme)
+		if !ok {
+			return ProxySpec{}, fmt.Errorf("unsupported proxy scheme %q (use http or socks5)", u.Scheme)
+		}
+		host := u.Hostname()
+		if !validProxyHost(host) {
+			return ProxySpec{}, fmt.Errorf("proxy url missing valid host")
+		}
+		port, ok := parsePort(u.Port())
+		if !ok {
+			return ProxySpec{}, fmt.Errorf("proxy url missing valid port")
+		}
+		var user, pass string
+		if u.User != nil {
+			user = u.User.Username()
+			pass, _ = u.User.Password()
+		}
+		return ProxySpec{
+			Scheme: scheme,
+			Host:   host,
+			Port:   port,
+			User:   user,
+			Pass:   pass,
+			Name:   strings.TrimSpace(u.Fragment),
+		}, nil
+	}
+
+	scheme := "socks5"
+	if defaultScheme != "" {
+		var ok bool
+		scheme, ok = normalizeProxyScheme(defaultScheme)
+		if !ok {
+			return ProxySpec{}, fmt.Errorf("unsupported proxy protocol %q (use http or socks5)", defaultScheme)
+		}
+	}
+
+	// Format with @: user[:pass]@host:port (or host:port@user[:pass]).
+	if at := strings.LastIndexByte(s, '@'); at >= 0 {
+		left, right := s[:at], s[at+1:]
+		if host, port, ok := splitHostPortStrict(right); ok {
+			user, pass := splitUserPass(left)
+			return ProxySpec{Scheme: scheme, Host: host, Port: port, User: user, Pass: pass}, nil
+		}
+		if atFirst := strings.IndexByte(s, '@'); atFirst >= 0 {
+			l2, r2 := s[:atFirst], s[atFirst+1:]
+			if host, port, ok := splitHostPortStrict(l2); ok {
+				user, pass := splitUserPass(r2)
+				return ProxySpec{Scheme: scheme, Host: host, Port: port, User: user, Pass: pass}, nil
+			}
+		}
+		return ProxySpec{}, fmt.Errorf("invalid proxy format (expected user:pass@host:port)")
+	}
+
+	// Bare host:port (including [ipv6]:port).
+	if host, port, ok := splitHostPortStrict(s); ok {
+		return ProxySpec{Scheme: scheme, Host: host, Port: port}, nil
+	}
+
+	// Bracketed IPv6 with auth: [ipv6]:port:user:pass
+	if strings.HasPrefix(s, "[") {
+		if end := strings.Index(s, "]:"); end > 1 {
+			host := s[1:end]
+			rest := strings.SplitN(s[end+2:], ":", 3)
+			if len(rest) == 3 {
+				if port, ok := parsePort(rest[0]); ok && validProxyHost(host) {
+					return ProxySpec{Scheme: scheme, Host: host, Port: port, User: rest[1], Pass: rest[2]}, nil
+				}
+			}
+		}
+		return ProxySpec{}, fmt.Errorf("invalid IPv6 proxy format")
+	}
+
+	// Colon-separated: host:port:user:pass (pass may contain :) or user:pass:host:port.
+	parts := strings.Split(s, ":")
+	if len(parts) >= 4 {
+		if port, ok := parsePort(parts[1]); ok && validProxyHost(parts[0]) {
+			return ProxySpec{
+				Scheme: scheme,
+				Host:   parts[0],
+				Port:   port,
+				User:   parts[2],
+				Pass:   strings.Join(parts[3:], ":"),
+			}, nil
+		}
+		if len(parts) == 4 {
+			if port, ok := parsePort(parts[3]); ok && validProxyHost(parts[2]) {
+				return ProxySpec{
+					Scheme: scheme,
+					Host:   parts[2],
+					Port:   port,
+					User:   parts[0],
+					Pass:   parts[1],
+				}, nil
+			}
+		}
+	}
+	return ProxySpec{}, fmt.Errorf("invalid proxy format (use http://, socks5://, host:port:user:pass, user:pass@host:port, or host:port)")
+}
+
+func splitHostPortStrict(s string) (string, int, bool) {
+	host, portStr, err := net.SplitHostPort(s)
+	if err != nil {
+		return "", 0, false
+	}
+	port, ok := parsePort(portStr)
+	if !ok || !validProxyHost(host) {
+		return "", 0, false
+	}
+	return host, port, true
+}
+
+func splitUserPass(s string) (user, pass string) {
+	if i := strings.IndexByte(s, ':'); i >= 0 {
+		return s[:i], s[i+1:]
+	}
+	return s, ""
+}
+
+// ProxyToOutbound converts a canonical http:// or socks5:// proxy URL into an
+// xray outbound JSON object tagged with tag.
+func ProxyToOutbound(uri, tag string) (json.RawMessage, error) {
+	s := strings.TrimSpace(uri)
+	if !strings.Contains(s, "://") {
+		return nil, fmt.Errorf("proxy url missing scheme (http:// or socks5://)")
+	}
+	spec, err := ParseProxy(s, "")
+	if err != nil {
+		return nil, err
+	}
+	proto := "socks"
+	if spec.Scheme == "http" {
+		proto = "http"
+	}
+	server := map[string]any{
+		"address": spec.Host,
+		"port":    spec.Port,
+	}
+	if spec.User != "" || spec.Pass != "" {
+		server["users"] = []any{map[string]any{
+			"user": spec.User,
+			"pass": spec.Pass,
+		}}
+	}
+	ob := map[string]any{
+		"tag":      tag,
+		"protocol": proto,
+		"settings": map[string]any{
+			"servers": []any{server},
+		},
+	}
+	return json.Marshal(ob)
+}
+
+// ExitToOutbound converts any supported final-exit URL (vless://, http://, or
+// socks5://) into an xray outbound object tagged with tag.
+func ExitToOutbound(uri, tag string) (json.RawMessage, error) {
+	s := strings.TrimSpace(uri)
+	u, err := url.Parse(s)
+	if err != nil {
+		return nil, fmt.Errorf("parse exit url: %w", err)
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "vless":
+		return VlessToOutbound(s, tag)
+	case "http", "socks", "socks5", "socks5h":
+		return ProxyToOutbound(s, tag)
+	default:
+		return nil, fmt.Errorf("unsupported exit scheme %q", u.Scheme)
+	}
 }
 
 // BuildConfig assembles a full xray config: a single SOCKS inbound on port, and

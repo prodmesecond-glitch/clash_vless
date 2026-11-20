@@ -1084,15 +1084,15 @@ type namedOB struct {
 	ob   json.RawMessage
 }
 
-// vlessURLPattern finds a URL quoted in a parse error: it carries the exit's UUID.
-var vlessURLPattern = regexp.MustCompile(`vless://[^\s"]*`)
+// exitURLPattern finds a URL quoted in a parse error: it carries the exit's UUID or proxy credentials.
+var exitURLPattern = regexp.MustCompile(`(?i)(?:vless|http|socks5h?|socks)://[^\s"]*`)
 
 func (s *Supervisor) namedOutbounds(mains []store.Main) []namedOB {
 	var out []namedOB
 	for _, m := range mains {
-		ob, err := xray.VlessToOutbound(m.URL, "main")
+		ob, err := xray.ExitToOutbound(m.URL, "main")
 		if err != nil {
-			msg := vlessURLPattern.ReplaceAllString(err.Error(), "vless://<redacted>")
+			msg := exitURLPattern.ReplaceAllString(err.Error(), "<redacted-url>")
 			if _, seen := s.badExitLogged.LoadOrStore(m.Name+"\x00"+msg, true); !seen {
 				s.Logf(loghub.Error, "route", m.Name, "invalid exit %q: %s", m.Name, msg)
 			}

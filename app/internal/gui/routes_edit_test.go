@@ -14,6 +14,7 @@ import (
 	"clashvless/internal/store"
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
+	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/test"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
@@ -860,5 +861,95 @@ func TestSlotTitleDisplaysFullName(t *testing.T) {
 	titleLabel := labels[0].(*widget.Label)
 	if titleLabel.Size().Width < 40 {
 		t.Fatalf("expected title label width >= 40px, got %.2f (would render as '...')", titleLabel.Size().Width)
+	}
+}
+
+func TestAddProxySlotAndExitsCopyPasteAndManual(t *testing.T) {
+	d, commands := routesDashboard(t)
+	d.render()
+
+	// Add an HTTP/SOCKS5 slot.
+	d.addSlot()
+	entry := routeDialogEntry(t, d)
+	entry.SetText("res-proxy")
+	selects := findRouteObjects(d.window.Canvas().Overlays().Top(), func(obj fyne.CanvasObject) bool {
+		_, ok := obj.(*widget.Select)
+		return ok
+	})
+	if len(selects) != 1 {
+		t.Fatalf("expected 1 slot type select, got %d", len(selects))
+	}
+	selects[0].(*widget.Select).SetSelected("HTTP / SOCKS5 proxy")
+	tapRouteDialogButton(t, d, "Add")
+	applyRoutePatch(t, d, commands)
+
+	idx := d.state.SlotIndexByName("res-proxy")
+	if idx < 0 || !d.state.Slots[idx].IsProxy() {
+		t.Fatalf("proxy slot not created: %+v", d.state.Slots)
+	}
+	if !routeHasText(d.content, "HTTP/SOCKS") {
+		t.Fatal("expected HTTP/SOCKS chip on proxy slot")
+	}
+
+	// Add via Copy-paste tab.
+	d.addMain(idx)
+	entries := findRouteObjects(d.window.Canvas().Overlays().Top(), func(obj fyne.CanvasObject) bool {
+		e, ok := obj.(*widget.Entry)
+		return ok && e.MultiLine
+	})
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 multiline paste entry, got %d", len(entries))
+	}
+	entries[0].(*widget.Entry).SetText("1.2.3.4:1080:alice:secret\nhttp://bob:pw@5.6.7.8:8080#Web")
+	tapRouteDialogButton(t, d, "Add")
+	applyRoutePatch(t, d, commands)
+
+	if got := len(d.state.Slots[idx].Mains); got != 2 {
+		t.Fatalf("expected 2 pasted proxy exits, got %d", got)
+	}
+	if d.state.Slots[idx].Mains[0].URL != "socks5://alice:secret@1.2.3.4:1080" || d.state.Slots[idx].Mains[1].URL != "http://bob:pw@5.6.7.8:8080#Web" {
+		t.Fatalf("unexpected pasted exits: %+v", d.state.Slots[idx].Mains)
+	}
+
+	// Add via Manual tab.
+	d.addMain(idx)
+	tabContainers := findRouteObjects(d.window.Canvas().Overlays().Top(), func(obj fyne.CanvasObject) bool {
+		_, ok := obj.(*container.AppTabs)
+		return ok
+	})
+	if len(tabContainers) != 1 {
+		t.Fatalf("expected 1 AppTabs in proxy exit dialog, got %d", len(tabContainers))
+	}
+	tabs := tabContainers[0].(*container.AppTabs)
+	tabs.SelectIndex(1)
+	manualEntries := findRouteObjects(tabs.Selected().Content, func(obj fyne.CanvasObject) bool {
+		_, ok := obj.(*widget.Entry)
+		return ok
+	})
+	if len(manualEntries) != 5 {
+		t.Fatalf("expected 5 manual entries (host, port, user, pass, name), got %d", len(manualEntries))
+	}
+	manualSelects := findRouteObjects(tabs.Selected().Content, func(obj fyne.CanvasObject) bool {
+		_, ok := obj.(*widget.Select)
+		return ok
+	})
+	manualSelects[0].(*widget.Select).SetSelected("HTTP")
+	manualEntries[0].(*widget.Entry).SetText("proxy.example")
+	manualEntries[1].(*widget.Entry).SetText("3128")
+	manualEntries[2].(*widget.Entry).SetText("carol")
+	manualEntries[3].(*widget.Entry).SetText("pass123")
+	manualEntries[4].(*widget.Entry).SetText("Office")
+	tapRouteDialogButton(t, d, "Add")
+	applyRoutePatch(t, d, commands)
+
+	if got := len(d.state.Slots[idx].Mains); got != 3 {
+		t.Fatalf("expected 3 proxy exits after manual add, got %d", got)
+	}
+	last := d.state.Slots[idx].Mains[2]
+	if last.Name != "Office" || last.URL != "http://carol:pass123@proxy.example:3128#Office" || !last.AllowNoHop {
+		t.Fatalf("unexpected manual exit: %+v", last)
+	}
+	if !routeHasText(d.content, "socks5 · auth") || !routeHasText(d.content, "http · auth") {
+		t.Fatal("expected socks5 · auth and http · auth chips on proxy exits")
 	}
 }

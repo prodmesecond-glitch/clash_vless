@@ -225,3 +225,53 @@ func TestHasMainIgnoresName(t *testing.T) {
 		}
 	}
 }
+
+func TestProxySlotAndProtoTags(t *testing.T) {
+	st := &State{ListenPort: 2084, Slots: []Slot{{Name: "main", Port: 2084, Enabled: true}}}
+	p := st.AddSlotOfType("res", SlotTypeProxy)
+	if !p.IsProxy() || p.Kind() != SlotTypeProxy || p.Type != SlotTypeProxy {
+		t.Fatalf("proxy slot = %+v", p)
+	}
+	v := st.AddSlot("v2")
+	if v.IsProxy() || v.Kind() != SlotTypeVLESS || v.Type != "" {
+		t.Fatalf("vless slot = %+v", v)
+	}
+	for in, want := range map[string]string{
+		"":           SlotTypeVLESS,
+		"vless":      SlotTypeVLESS,
+		"proxy":      SlotTypeProxy,
+		"http":       SlotTypeProxy,
+		"socks5":     SlotTypeProxy,
+		"http/socks": SlotTypeProxy,
+	} {
+		got, ok := NormalizeSlotType(in)
+		if !ok || got != want {
+			t.Errorf("NormalizeSlotType(%q) = (%q, %v), want (%q, true)", in, got, ok, want)
+		}
+	}
+	if _, ok := NormalizeSlotType("wireguard"); ok {
+		t.Error("expected unknown slot type to fail")
+	}
+
+	p.AddMain("socks5://alice:secret@1.2.3.4:1080#Office")
+	p.AddMain("http://5.6.7.8:8080")
+	if len(p.DirectMains()) != 2 || len(p.HopMains()) != 2 {
+		t.Fatalf("proxy mains should be eligible for both direct and hop: direct=%d hop=%d", len(p.DirectMains()), len(p.HopMains()))
+	}
+	if p.Mains[0].Name != "Office" || p.Mains[1].Name != "5.6.7.8:8080" {
+		t.Fatalf("main names = %q, %q", p.Mains[0].Name, p.Mains[1].Name)
+	}
+	for u, want := range map[string]string{
+		"socks5://alice:secret@1.2.3.4:1080#Office": "socks5·auth",
+		"socks5://1.2.3.4:1080":                     "socks5",
+		"http://u:p@1.2.3.4:8080":                   "http·auth",
+		"http://1.2.3.4:8080":                       "http",
+	} {
+		if got := ProtoTag(u); got != want {
+			t.Errorf("ProtoTag(%q) = %q, want %q", u, got, want)
+		}
+		if !IsProxyURL(u) || !IsPlain(u) {
+			t.Errorf("IsProxyURL/IsPlain(%q) expected true", u)
+		}
+	}
+}

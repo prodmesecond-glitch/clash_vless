@@ -94,7 +94,7 @@ func (d *dashboard) setupPanel() fyne.CanvasObject {
 		step(len(d.state.Subs) > 0, "Add a subscription", "Provides the entry nodes used as hops (T2/T3)",
 			widget.NewButtonWithIcon("Add subscription", theme.ContentAddIcon(), d.addSubscription)),
 		widget.NewSeparator(),
-		step(false, "Add a final VLESS exit", "The server your traffic finally leaves from",
+		step(false, "Add a final exit", "The server or proxy your traffic finally leaves from",
 			widget.NewButtonWithIcon("Add exit", theme.ContentAddIcon(), func() { d.addMain(0) })),
 	)
 }
@@ -199,6 +199,9 @@ func (d *dashboard) endpointsPanel() fyne.CanvasObject {
 			continue
 		}
 		var tags []fyne.CanvasObject
+		if slot.IsProxy() {
+			tags = append(tags, neutralChip("HTTP/SOCKS"))
+		}
 		if tunSlot != "" && slot.Name == tunSlot {
 			tags = append(tags, tintChip("VPN", colorAccent))
 		}

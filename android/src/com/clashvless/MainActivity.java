@@ -376,6 +376,12 @@ public class MainActivity extends Activity {
             head.setGravity(Gravity.CENTER_VERTICAL);
             TextView title = oneLine(name, 14, TEXT, true);
             head.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
+            if ("proxy".equals(sl.optString("type"))) {
+                TextView proxyChip = neutralChip("HTTP/SOCKS");
+                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2);
+                lp.setMargins(0, 0, dp(6), 0);
+                head.addView(proxyChip, lp);
+            }
             if (name.equals(tun)) head.addView(tintChip("VPN", ACCENT));
             box.addView(head);
             box.addView(text(address + (hop > 0 ? "  |  first hop :" + hop : ""), 12, MUTED, false));
@@ -894,7 +900,7 @@ public class MainActivity extends Activity {
 
         if (slots == null || slots.length() == 0) {
             body.addView(card("", "No failover slots configured. Tap \"Add failover slot\" to create one."));
-            body.addView(card("Routing compatibility", "Vision exits are direct-only. Plain exits can use any hop; REALITY exits require a non-Vision hop."));
+            body.addView(card("Routing compatibility", "Vision exits are direct-only. Plain VLESS and HTTP/SOCKS5 exits can use any hop; REALITY exits require a non-Vision hop."));
             return;
         }
 
@@ -988,6 +994,12 @@ public class MainActivity extends Activity {
             tabTexts.addView(text(portDesc, 11, MUTED, false));
             tabItem.addView(tabTexts, new LinearLayout.LayoutParams(0, -2, 1));
 
+            if ("proxy".equals(sl.optString("type"))) {
+                TextView proxyBadge = neutralChip("HTTP/SOCKS");
+                LinearLayout.LayoutParams pParams = new LinearLayout.LayoutParams(-2, -2);
+                pParams.setMargins(0, 0, dp(6), 0);
+                tabItem.addView(proxyBadge, pParams);
+            }
             if (isTun) {
                 TextView vpnBadge = text("VPN", 10, ACCENT, true);
                 vpnBadge.setPadding(dp(6), dp(2), dp(6), dp(2));
@@ -1085,7 +1097,7 @@ public class MainActivity extends Activity {
 
             LinearLayout slot = card(titleRow, null);
             JSONObject live = liveSlot(s, name);
-            slot.addView(slotStatus(sl.optBoolean("enabled"), live, sl.optInt("port"), hopPort(st, si)), topMargin(10));
+            slot.addView(slotStatus(sl.optBoolean("enabled"), live, sl.optInt("port"), hopPort(st, si), "proxy".equals(sl.optString("type"))), topMargin(10));
             Button vpnBtn = btn(name.equals(tunSlot) ? "Selected for VPN" : "Use for VPN", false,
                     name.equals(tunSlot) ? () -> {} : () -> Ctl.patch("tun_slot", name));
             if (name.equals(tunSlot)) {
@@ -1097,7 +1109,7 @@ public class MainActivity extends Activity {
             body.addView(exitsCard(sl, live), spaced());
         }
 
-        body.addView(card("Routing compatibility", "Vision exits are direct-only. Plain exits can use any hop; REALITY exits require a non-Vision hop."));
+        body.addView(card("Routing compatibility", "Vision exits are direct-only. Plain VLESS and HTTP/SOCKS5 exits can use any hop; REALITY exits require a non-Vision hop."));
     }
 
     private static JSONObject liveSlot(JSONObject s, String name) {
@@ -1139,7 +1151,7 @@ public class MainActivity extends Activity {
     }
 
     /** The slot's state in a box tinted by it: the state tag, the route or error, then its ports. */
-    private View slotStatus(boolean enabled, JSONObject live, int port, int hop) {
+    private View slotStatus(boolean enabled, JSONObject live, int port, int hop, boolean isProxy) {
         Object[] state = liveState(enabled, live);
         LinearLayout box = toned((int) state[3]);
         box.addView(flow((View) state[0]));
@@ -1147,7 +1159,9 @@ public class MainActivity extends Activity {
         route.setMaxLines(2);
         route.setEllipsize(TextUtils.TruncateAt.END);
         box.addView(route, topMargin(4));
-        FlowLayout ports = flow(neutralChip("Port " + port));
+        FlowLayout ports = flow();
+        if (isProxy) ports.addView(tintChip("HTTP/SOCKS", ACCENT));
+        ports.addView(neutralChip("Port " + port));
         if (hop > 0) ports.addView(neutralChip("Hop " + hop));
         box.addView(ports, topMargin(4));
         return box;
@@ -1184,7 +1198,11 @@ public class MainActivity extends Activity {
         card.addView(head);
         if (count == 0) card.addView(text("No final exits in this slot yet.", 12, MUTED, false), topMargin(8));
         for (int m = 0; m < count; m++) card.addView(exitCard(slotName, mains.optJSONObject(m), m, count, live), topMargin(8));
-        card.addView(btn("Add final exits", true, () -> addExits(slotName)), topMargin(10));
+        boolean isProxy = "proxy".equals(sl.optString("type"));
+        card.addView(btn("Add final exits", true, () -> {
+            if (isProxy) addProxyExits(slotName);
+            else addExits(slotName);
+        }), topMargin(10));
         return card;
     }
 
@@ -1291,40 +1309,198 @@ public class MainActivity extends Activity {
         } catch (Exception e) { failed(e); }
     }
 
+    /** Adds HTTP/SOCKS5 exits via either copy-paste or manual parameter input. */
+    private void addProxyExits(String slotName) {
+        Dialog dialog = new Dialog(this);
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setPadding(dp(20), dp(18), dp(20), dp(18));
+        GradientDrawable bg = round(CARD, 12);
+        bg.setStroke(dp(1), BORDER);
+        root.setBackground(bg);
+        TextView titleView = text("Add HTTP / SOCKS5 exits", 16, TEXT, true);
+        titleView.setPadding(0, 0, 0, dp(10));
+        root.addView(titleView);
+
+        final boolean[] manualMode = {false};
+        final String[] pasteProto = {"socks5"};
+        final String[] manualProto = {"socks5"};
+
+        Button pasteModeBtn = btn("Copy-paste", true, () -> {});
+        Button manualModeBtn = btn("Manual", false, () -> {});
+        LinearLayout modeRow = equalRow(pasteModeBtn, manualModeBtn);
+        root.addView(modeRow);
+
+        // Copy-paste view
+        LinearLayout pasteBox = new LinearLayout(this);
+        pasteBox.setOrientation(LinearLayout.VERTICAL);
+        pasteBox.addView(text("Default protocol (when omitted)", 12, MUTED, false), topMargin(10));
+        Button pasteSocksBtn = btn("SOCKS5", true, () -> {});
+        Button pasteHttpBtn = btn("HTTP", false, () -> {});
+        pasteBox.addView(equalRow(pasteSocksBtn, pasteHttpBtn), topMargin(4));
+        EditText pasteInput = styledInput("socks5://user:pass@host:port\nhttp://host:port\nhost:port:user:pass",
+                InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+        pasteInput.setGravity(Gravity.TOP | Gravity.START);
+        pasteInput.setMinLines(4);
+        pasteInput.setMaxLines(7);
+        pasteBox.addView(pasteInput, topMargin(8));
+
+        // Manual view
+        LinearLayout manualBox = new LinearLayout(this);
+        manualBox.setOrientation(LinearLayout.VERTICAL);
+        manualBox.setVisibility(View.GONE);
+        manualBox.addView(text("Protocol", 12, MUTED, false), topMargin(10));
+        Button manSocksBtn = btn("SOCKS5", true, () -> {});
+        Button manHttpBtn = btn("HTTP", false, () -> {});
+        manualBox.addView(equalRow(manSocksBtn, manHttpBtn), topMargin(4));
+        EditText hostInput = styledInput("Host (1.2.3.4 or proxy.example.com)", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+        EditText portInput = styledInput("Port (1080)", InputType.TYPE_CLASS_NUMBER);
+        EditText userInput = styledInput("Username (optional)", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+        EditText passInput = styledInput("Password (optional)", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        EditText nameInput = styledInput("Name (optional, defaults to host:port)", InputType.TYPE_CLASS_TEXT);
+        CheckBox directCheck = check("Allow direct (T1)", true);
+        manualBox.addView(hostInput, topMargin(8));
+        manualBox.addView(portInput, topMargin(6));
+        manualBox.addView(userInput, topMargin(6));
+        manualBox.addView(passInput, topMargin(6));
+        manualBox.addView(nameInput, topMargin(6));
+        manualBox.addView(directCheck, topMargin(6));
+
+        Runnable refreshToggle = () -> {
+            styleToggle(pasteModeBtn, !manualMode[0]);
+            styleToggle(manualModeBtn, manualMode[0]);
+            pasteBox.setVisibility(manualMode[0] ? View.GONE : View.VISIBLE);
+            manualBox.setVisibility(manualMode[0] ? View.VISIBLE : View.GONE);
+            styleToggle(pasteSocksBtn, "socks5".equals(pasteProto[0]));
+            styleToggle(pasteHttpBtn, "http".equals(pasteProto[0]));
+            styleToggle(manSocksBtn, "socks5".equals(manualProto[0]));
+            styleToggle(manHttpBtn, "http".equals(manualProto[0]));
+        };
+        pasteModeBtn.setOnClickListener(v -> { manualMode[0] = false; refreshToggle.run(); });
+        manualModeBtn.setOnClickListener(v -> { manualMode[0] = true; refreshToggle.run(); });
+        pasteSocksBtn.setOnClickListener(v -> { pasteProto[0] = "socks5"; refreshToggle.run(); });
+        pasteHttpBtn.setOnClickListener(v -> { pasteProto[0] = "http"; refreshToggle.run(); });
+        manSocksBtn.setOnClickListener(v -> { manualProto[0] = "socks5"; refreshToggle.run(); });
+        manHttpBtn.setOnClickListener(v -> { manualProto[0] = "http"; refreshToggle.run(); });
+        refreshToggle.run();
+
+        ScrollView scroll = new ScrollView(this);
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.addView(pasteBox);
+        content.addView(manualBox);
+        scroll.addView(content);
+        root.addView(scroll, new LinearLayout.LayoutParams(-1, -2));
+
+        LinearLayout buttons = new LinearLayout(this);
+        buttons.setGravity(Gravity.END);
+        buttons.addView(btn("Cancel", false, dialog::dismiss));
+        buttons.addView(new View(this), new LinearLayout.LayoutParams(dp(8), 1));
+        buttons.addView(btn("Add", true, () -> {
+            if (!Ctl.connected) { toast("Daemon not connected"); return; }
+            if (!manualMode[0]) {
+                String value = pasteInput.getText().toString().trim();
+                if (value.isEmpty()) { toast("Enter at least one proxy"); return; }
+                dialog.dismiss();
+                try {
+                    JSONObject req = new JSONObject().put("parse", value).put("slot_type", "proxy").put("default_scheme", pasteProto[0]);
+                    Exports.call(this, req, response -> mergeParsedExits(slotName, response, "Enter at least one valid HTTP/SOCKS5 proxy", null));
+                } catch (Exception e) { failed(e); }
+                return;
+            }
+            String host = hostInput.getText().toString().trim();
+            int port;
+            try { port = Integer.parseInt(portInput.getText().toString().trim()); } catch (NumberFormatException e) { port = 0; }
+            if (host.isEmpty()) { toast("Enter a proxy host"); return; }
+            if (port < 1 || port > 65535) { toast("Port must be between 1 and 65535"); return; }
+            boolean allowDirect = directCheck.isChecked();
+            dialog.dismiss();
+            try {
+                JSONObject spec = new JSONObject()
+                        .put("scheme", manualProto[0])
+                        .put("host", host)
+                        .put("port", port)
+                        .put("user", userInput.getText().toString())
+                        .put("pass", passInput.getText().toString())
+                        .put("name", nameInput.getText().toString().trim());
+                Exports.call(this, new JSONObject().put("build_proxy", spec),
+                        response -> mergeParsedExits(slotName, response, "Invalid proxy parameters", allowDirect));
+            } catch (Exception e) { failed(e); }
+        }));
+        root.addView(buttons, topMargin(14));
+
+        dialog.setContentView(root);
+        if (dialog.getWindow() != null) {
+            dialog.getWindow().setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+            dialog.getWindow().setLayout(Math.min((int) (getResources().getDisplayMetrics().widthPixels * 0.92f), dp(420)), ViewGroup.LayoutParams.WRAP_CONTENT);
+            dialog.getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
+        }
+        dialog.show();
+    }
+
+    private void mergeParsedExits(String slotName, JSONObject response, String emptyError, Boolean allowDirectOverride) {
+        String err = response.optString("error");
+        if (!err.isEmpty()) { toast(err); return; }
+        JSONArray exits = response.optJSONArray("exits");
+        int invalid = response.optInt("invalid");
+        if (exits == null || exits.length() == 0) { toast(emptyError); return; }
+        JSONObject st = Ctl.state;
+        JSONArray slots = copy(st == null ? null : st.optJSONArray("slots"));
+        for (int s = 0; s < slots.length(); s++) {
+            JSONObject slot = slots.optJSONObject(s);
+            if (!slotName.equals(slot.optString("name"))) continue;
+            try {
+                JSONArray mains = slot.optJSONArray("mains");
+                if (mains == null) slot.put("mains", mains = new JSONArray());
+                Set<String> present = new HashSet<>();
+                for (int m = 0; m < mains.length(); m++) present.add(withoutName(mains.optJSONObject(m).optString("url")));
+                int added = 0, duplicate = 0;
+                for (int e = 0; e < exits.length(); e++) {
+                    JSONObject exit = exits.optJSONObject(e);
+                    if (!present.add(withoutName(exit.optString("url")))) { duplicate++; continue; }
+                    if (allowDirectOverride != null) exit.put("allow_no_hop", allowDirectOverride);
+                    mains.put(exit);
+                    added++;
+                }
+                if (added > 0) Ctl.patch("slots", slots);
+                String message = "Added " + added + " exit(s) to " + slotName;
+                if (duplicate > 0) message += " | " + duplicate + " already present";
+                if (invalid > 0) message += " | " + invalid + " invalid line(s) skipped";
+                toast(message);
+            } catch (Exception e) { failed(e); }
+            return;
+        }
+        toast("This slot was removed while editing");
+    }
+
+    private EditText styledInput(String hint, int inputType) {
+        EditText input = new EditText(this);
+        input.setInputType(inputType);
+        input.setHint(hint);
+        input.setTextColor(TEXT);
+        input.setHintTextColor(MUTED);
+        input.setTextSize(13);
+        input.setPadding(dp(12), dp(10), dp(12), dp(10));
+        GradientDrawable inputBg = round(CONTROL, 8);
+        inputBg.setStroke(dp(1), BORDER);
+        input.setBackground(inputBg);
+        input.setOnFocusChangeListener((v, hasFocus) -> inputBg.setStroke(dp(1), hasFocus ? ACCENT : BORDER));
+        return input;
+    }
+
+    private void styleToggle(Button button, boolean selected) {
+        GradientDrawable content = round(selected ? ACCENT : Color.rgb(31, 39, 49), 8);
+        button.setBackground(new RippleDrawable(ColorStateList.valueOf(selected ? 0x55ffffff : 0x3368d5bd), content, round(Color.WHITE, 8)));
+        button.setTextColor(selected ? BG : TEXT);
+    }
+
     /** Takes several links, one per line, or a base64 subscription; the Go side validates and names them. */
     private void addExits(String slotName) {
         askLines("Add final exits", "vless://... one per line, or a base64 subscription", value -> {
             try {
-                Exports.call(this, new JSONObject().put("parse", value), response -> {
-                    JSONArray exits = response.optJSONArray("exits");
-                    int invalid = response.optInt("invalid");
-                    if (exits == null || exits.length() == 0) { toast("Enter at least one valid vless:// link"); return; }
-                    JSONObject st = Ctl.state;
-                    JSONArray slots = copy(st == null ? null : st.optJSONArray("slots"));
-                    for (int s = 0; s < slots.length(); s++) {
-                        JSONObject slot = slots.optJSONObject(s);
-                        if (!slotName.equals(slot.optString("name"))) continue;
-                        try {
-                            JSONArray mains = slot.optJSONArray("mains");
-                            if (mains == null) slot.put("mains", mains = new JSONArray());
-                            Set<String> present = new HashSet<>();
-                            for (int m = 0; m < mains.length(); m++) present.add(withoutName(mains.optJSONObject(m).optString("url")));
-                            int added = 0, duplicate = 0;
-                            for (int e = 0; e < exits.length(); e++) {
-                                if (!present.add(withoutName(exits.optJSONObject(e).optString("url")))) { duplicate++; continue; }
-                                mains.put(exits.optJSONObject(e));
-                                added++;
-                            }
-                            if (added > 0) Ctl.patch("slots", slots);
-                            String message = "Added " + added + " exit(s) to " + slotName;
-                            if (duplicate > 0) message += " | " + duplicate + " already present";
-                            if (invalid > 0) message += " | " + invalid + " invalid line(s) skipped";
-                            toast(message);
-                        } catch (Exception e) { failed(e); }
-                        return;
-                    }
-                    toast("This slot was removed while editing");
-                });
+                Exports.call(this, new JSONObject().put("parse", value),
+                        response -> mergeParsedExits(slotName, response, "Enter at least one valid vless:// link", null));
             } catch (Exception e) { failed(e); }
         });
     }
@@ -1879,19 +2055,68 @@ public class MainActivity extends Activity {
     private void addSlot() {
         JSONObject st = Ctl.state;
         if (st == null) return;
-        ask("New slot name", "slot" + (copy(st.optJSONArray("slots")).length() + 1), InputType.TYPE_CLASS_TEXT, value -> {
-            String name = value.trim();
+        Dialog dialog = new Dialog(this);
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setPadding(dp(20), dp(18), dp(20), dp(18));
+        GradientDrawable bg = round(CARD, 12);
+        bg.setStroke(dp(1), BORDER);
+        root.setBackground(bg);
+        TextView titleView = text("Add failover slot", 16, TEXT, true);
+        titleView.setPadding(0, 0, 0, dp(10));
+        root.addView(titleView);
+
+        EditText nameInput = styledInput("Slot name", InputType.TYPE_CLASS_TEXT);
+        nameInput.setText("slot" + (copy(st.optJSONArray("slots")).length() + 1));
+        root.addView(nameInput);
+
+        root.addView(text("Slot type", 12, MUTED, false), topMargin(12));
+        final boolean[] isProxy = {false};
+        Button vlessBtn = btn("VLESS", true, () -> {});
+        Button proxyBtn = btn("HTTP / SOCKS5", false, () -> {});
+        Runnable refresh = () -> {
+            styleToggle(vlessBtn, !isProxy[0]);
+            styleToggle(proxyBtn, isProxy[0]);
+        };
+        vlessBtn.setOnClickListener(v -> { isProxy[0] = false; refresh.run(); });
+        proxyBtn.setOnClickListener(v -> { isProxy[0] = true; refresh.run(); });
+        refresh.run();
+        root.addView(equalRow(vlessBtn, proxyBtn), topMargin(6));
+
+        LinearLayout buttons = new LinearLayout(this);
+        buttons.setGravity(Gravity.END);
+        buttons.addView(btn("Cancel", false, dialog::dismiss));
+        buttons.addView(new View(this), new LinearLayout.LayoutParams(dp(8), 1));
+        buttons.addView(btn("Add", true, () -> {
+            String name = nameInput.getText().toString().trim();
             if (!validSlotName(name)) return;
+            if (!Ctl.connected) { toast("Daemon not connected"); return; }
             JSONObject now = Ctl.state;
             try {
                 JSONArray slots = copy(now.optJSONArray("slots"));
-                for (int i = 0; i < slots.length(); i++) if (name.equals(slots.optJSONObject(i).optString("name"))) { toast("Slot name already exists"); return; }
-                slots.put(new JSONObject().put("name", name).put("port", freePort(now)).put("enabled", true).put("mains", new JSONArray()));
+                for (int i = 0; i < slots.length(); i++) {
+                    if (name.equals(slots.optJSONObject(i).optString("name"))) { toast("Slot name already exists"); return; }
+                }
+                JSONObject slot = new JSONObject().put("name", name).put("port", freePort(now)).put("enabled", true).put("mains", new JSONArray());
+                if (isProxy[0]) slot.put("type", "proxy");
+                slots.put(slot);
                 slotsMenuExpanded = true;
                 selectedSlotName = name;
+                dialog.dismiss();
                 Ctl.patch("slots", slots);
             } catch (Exception e) { failed(e); }
-        });
+        }));
+        root.addView(buttons, topMargin(16));
+
+        dialog.setContentView(root);
+        if (dialog.getWindow() != null) {
+            dialog.getWindow().setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+            dialog.getWindow().setLayout(Math.min((int) (getResources().getDisplayMetrics().widthPixels * 0.92f), dp(420)), ViewGroup.LayoutParams.WRAP_CONTENT);
+            dialog.getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE);
+        }
+        dialog.show();
+        nameInput.requestFocus();
     }
 
     private boolean validSlotName(String name) {
@@ -2439,6 +2664,12 @@ public class MainActivity extends Activity {
 
     private static String proto(String value) {
         android.net.Uri uri = android.net.Uri.parse(value);
+        String scheme = uri.getScheme() == null ? "" : uri.getScheme().toLowerCase(java.util.Locale.ROOT);
+        if (scheme.equals("http") || scheme.equals("socks") || scheme.equals("socks5") || scheme.equals("socks5h")) {
+            String tag = scheme.equals("http") ? "http" : "socks5";
+            String userInfo = uri.getUserInfo();
+            return userInfo != null && !userInfo.isEmpty() ? tag + " | auth" : tag;
+        }
         String flow = uri.getQueryParameter("flow"), security = uri.getQueryParameter("security"), network = uri.getQueryParameter("type");
         String tag = flow != null && flow.contains("xtls-rprx-vision") ? "vision" : security == null || security.isEmpty() || security.equals("none") ? "plain" : security;
         return network == null || network.isEmpty() || network.equals("tcp") ? tag : tag + " | " + network;
@@ -2452,7 +2683,7 @@ public class MainActivity extends Activity {
 
     private static String mainHost(String value) {
         android.net.Uri uri = android.net.Uri.parse(value);
-        return uri.getHost() == null ? "Invalid VLESS URL" : uri.getHost() + (uri.getPort() > 0 ? ":" + uri.getPort() : "");
+        return uri.getHost() == null ? "Invalid exit URL" : uri.getHost() + (uri.getPort() > 0 ? ":" + uri.getPort() : "");
     }
 
     private static JSONArray copy(JSONArray value) {

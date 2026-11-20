@@ -112,11 +112,47 @@ func ParseExits(text string) (links []string, invalid int) {
 	return links, invalid
 }
 
+// ParseProxyExits takes HTTP/SOCKS5 proxies one per line — either standard URLs
+// (http://, socks5://) or common proxy formats (host:port:user:pass,
+// user:pass@host:port, host:port) — or a base64 list, and returns canonical URLs.
+func ParseProxyExits(text, defaultScheme string) (links []string, invalid int) {
+	text = strings.TrimSpace(text)
+	if text != "" && !strings.ContainsAny(text, "://@") && len(strings.Fields(text)) == 1 {
+		for _, encoding := range []*base64.Encoding{base64.StdEncoding, base64.RawStdEncoding, base64.URLEncoding, base64.RawURLEncoding} {
+			if decoded, err := encoding.DecodeString(text); err == nil {
+				text = string(decoded)
+				break
+			}
+		}
+	}
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		spec, err := xray.ParseProxy(line, defaultScheme)
+		if err != nil {
+			invalid++
+			continue
+		}
+		formatted, err := xray.FormatProxyURL(spec)
+		if err != nil {
+			invalid++
+			continue
+		}
+		links = append(links, formatted)
+	}
+	return links, invalid
+}
+
 // Request is what the Android app sends the `share` command on stdin.
 type Request struct {
-	Mains []store.Main `json:"mains,omitempty"`
-	Nodes []store.Node `json:"nodes,omitempty"`
-	Parse string       `json:"parse,omitempty"`
+	Mains         []store.Main    `json:"mains,omitempty"`
+	Nodes         []store.Node    `json:"nodes,omitempty"`
+	Parse         string          `json:"parse,omitempty"`
+	SlotType      string          `json:"slot_type,omitempty"`
+	DefaultScheme string          `json:"default_scheme,omitempty"`
+	BuildProxy    *xray.ProxySpec `json:"build_proxy,omitempty"`
 }
 
 type Code struct {
@@ -134,6 +170,7 @@ type Response struct {
 	Skipped int          `json:"skipped,omitempty"`
 	Exits   []store.Main `json:"exits,omitempty"`
 	Invalid int          `json:"invalid,omitempty"`
+	Error   string       `json:"error,omitempty"`
 }
 
 func Handle(request Request) Response {
@@ -161,13 +198,33 @@ func Handle(request Request) Response {
 			response.Links[i].QR = &Code{Size: code.Size, Modules: modules.String()}
 		}
 	}
-	if request.Parse != "" {
-		parsed, invalid := ParseExits(request.Parse)
-		var slot store.Slot
-		for _, link := range parsed {
-			slot.AddMain(link)
+	if request.BuildProxy != nil {
+		formatted, err := xray.FormatProxyURL(*request.BuildProxy)
+		if err != nil {
+			response.Error = err.Error()
+		} else {
+			slot := store.Slot{Type: store.SlotTypeProxy}
+			slot.AddMain(formatted)
+			response.Exits = slot.Mains
 		}
-		response.Exits, response.Invalid = slot.Mains, invalid
+		return response
+	}
+	if request.Parse != "" {
+		if request.SlotType == store.SlotTypeProxy {
+			parsed, invalid := ParseProxyExits(request.Parse, request.DefaultScheme)
+			slot := store.Slot{Type: store.SlotTypeProxy}
+			for _, link := range parsed {
+				slot.AddMain(link)
+			}
+			response.Exits, response.Invalid = slot.Mains, invalid
+		} else {
+			parsed, invalid := ParseExits(request.Parse)
+			var slot store.Slot
+			for _, link := range parsed {
+				slot.AddMain(link)
+			}
+			response.Exits, response.Invalid = slot.Mains, invalid
+		}
 	}
 	return response
 }
